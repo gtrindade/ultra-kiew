@@ -19,18 +19,18 @@ const (
 	ChatDataPath = "chat_data"
 )
 
-// Storage provides a simple file-based storage system.
-type Storage struct {
+// Client provides a simple file-based storage system.
+type Client struct {
 	sync.RWMutex
 }
 
-// NewStorage creates a new Storage instance with the specified base path.
-func NewStorage() *Storage {
-	return &Storage{}
+// NewClient creates a new Client instance with the specified base path.
+func NewClient() *Client {
+	return &Client{}
 }
 
 // Save saves the given data to a file with the specified name.
-func (s *Storage) Save(name string, data any) error {
+func (s *Client) Save(name string, data any) error {
 	s.Lock()
 	defer s.Unlock()
 
@@ -50,7 +50,7 @@ func (s *Storage) Save(name string, data any) error {
 }
 
 // Load loads data from a file with the specified name into the provided data structure.
-func (s *Storage) Load(name string, data any) error {
+func (s *Client) Load(name string, data any) error {
 	s.RLock()
 	defer s.RUnlock()
 
@@ -70,7 +70,7 @@ func (s *Storage) Load(name string, data any) error {
 }
 
 // Delete removes the file with the specified name.
-func (s *Storage) Delete(name string) error {
+func (s *Client) Delete(name string) error {
 	s.Lock()
 	defer s.Unlock()
 

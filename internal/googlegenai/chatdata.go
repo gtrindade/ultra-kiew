@@ -12,6 +12,19 @@ const (
 )
 
 var (
+	tempChatData = map[string]any{
+		"Hel": map[string]any{
+			"HP": 25,
+			"AC": 17,
+		},
+		"Thif": map[string]any{
+			"HP": 30,
+			"AC": 18,
+		},
+	}
+)
+
+var (
 	actionGet    = "get"
 	actionSet    = "set"
 	validActions = []string{actionGet, actionSet}
@@ -19,19 +32,37 @@ var (
 	ChatDataTool = &genai.Tool{
 		FunctionDeclarations: []*genai.FunctionDeclaration{
 			{
-				Name:        ChatData,
-				Description: "Manages chat data",
+				Name: ChatData,
+				Description: `Manages game character data. Use this to check or update character statistics.
+            Examples:
+            - "What is Hel's current HP?" -> get Hel.HP
+            - "Set Thif's AC to 19" -> set Thif.AC with value 19
+            - "Update Hel's health to 20" -> set Hel.HP with value 20
+            
+            Sample available characters and their properties:
+            - Hel: HP (health points), AC (armor class)
+            - Thif: HP (health points), AC (armor class)
+            
+            The data is structured as: character_name.property`,
 				Parameters: &genai.Schema{
 					Type: "object",
 					Properties: map[string]*genai.Schema{
 						"action": {
-							Type:        "string",
-							Description: "The action to perform on chat data",
-							Example:     "What is Hel's current HP?",
+							Type: "string",
+							Description: `The action to perform:
+                        - "get" when asking about current values
+                        - "set" when updating values`,
+							Example: "What is Hel's current HP?",
+							Enum:    validActions,
 						},
-						"newData": {
+						"path": {
 							Type:        "string",
-							Description: "New data to update the chat with",
+							Description: "The path to the chat data to get or set",
+							Example:     "Hel.HP",
+						},
+						"value": {
+							Type:        "string",
+							Description: "The new value for given path",
 							Example:     "Hel's current HP is 25",
 						},
 					},
@@ -60,10 +91,18 @@ func (c *Client) ChatData(args map[string]any) (string, error) {
 		return "", fmt.Errorf("invalid action: %s, must be one of %v", action, validActions)
 	}
 
-	newData, ok := args["newData"].(string)
-	if !ok && action == actionSet {
-		return "", fmt.Errorf("invalid argument: newData is required when action is 'set'")
+	switch action {
+	case actionGet:
+		fmt.Printf("Performing action: %q", action)
+		return fmt.Sprintf("Current chat data: %v", tempChatData), nil
+	case actionSet:
+		newData, ok := args["newData"].(string)
+		if !ok && action == actionSet {
+			return "", fmt.Errorf("invalid argument: newData is required when action is 'set'")
+		}
+		fmt.Printf("Performing action: %q with data: %q\n", action, newData)
+
+		return fmt.Sprintf("Chat data updated successfully: %v", tempChatData), nil
 	}
 
-	fmt.Printf("Performing action: %q with data: %q\n", action, newData)
 }

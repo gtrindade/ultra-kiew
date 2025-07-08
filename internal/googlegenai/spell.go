@@ -1,4 +1,4 @@
-package tools
+package googlegenai
 
 import (
 	"context"
@@ -48,5 +48,5 @@ func (c *Client) SpellLookup(args map[string]any) (string, error) {
 	fmt.Printf("Looking up spell: %q\n", spellName)
 
 	filePath := path.Join(storage.BasePath, storage.PDFsPath, spellCompendium)
-	return c.SendMessageWithFile(context.Background(), spellName)
+	return c.SendMessageWithFile(context.Background(), spellName, filePath)
 }

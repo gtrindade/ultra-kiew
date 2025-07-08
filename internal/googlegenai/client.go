@@ -7,6 +7,7 @@ import (
 	"os"
 	"sync"
 
+	"github.com/gtrindade/ultra-kiew/internal/storage"
 	"google.golang.org/genai"
 )
 
@@ -26,16 +27,17 @@ type ToolConfig struct {
 }
 
 type Client struct {
-	client      *genai.Client
-	config      *genai.GenerateContentConfig
-	chats       map[int]*genai.Chat
-	toolConfigs map[string]*ToolConfig
-	lock        sync.RWMutex
-	fileCache   map[string][]byte
+	client        *genai.Client
+	config        *genai.GenerateContentConfig
+	chats         map[int]*genai.Chat
+	toolConfigs   map[string]*ToolConfig
+	lock          sync.RWMutex
+	fileCache     map[string][]byte
+	storageClient *storage.Client
 }
 
 // NewClient creates a new Google GenAI client with the provided API key and backend.
-func NewClient(ctx context.Context, toolConfigs map[string]*ToolConfig) (*Client, error) {
+func NewClient(ctx context.Context, toolConfigs map[string]*ToolConfig, storageClient *storage.Client) (*Client, error) {
 	apiKey := os.Getenv("GEMINI_API_KEY")
 	if apiKey == "" {
 		log.Fatal("GEMINI_API_KEY environment variable is not set")
@@ -49,10 +51,11 @@ func NewClient(ctx context.Context, toolConfigs map[string]*ToolConfig) (*Client
 	}
 
 	c := &Client{
-		chats:       make(map[int]*genai.Chat),
-		client:      client,
-		toolConfigs: toolConfigs,
-		fileCache:   make(map[string][]byte),
+		chats:         make(map[int]*genai.Chat),
+		client:        client,
+		toolConfigs:   toolConfigs,
+		fileCache:     make(map[string][]byte),
+		storageClient: storageClient,
 	}
 
 	toolConfigs[SpellLookup] = &ToolConfig{

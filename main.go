@@ -6,6 +6,7 @@ import (
 
 	"github.com/gtrindade/ultra-kiew/internal/diceroller"
 	"github.com/gtrindade/ultra-kiew/internal/googlegenai"
+	"github.com/gtrindade/ultra-kiew/internal/storage"
 	"github.com/gtrindade/ultra-kiew/internal/telegram"
 )
 
@@ -19,7 +20,12 @@ func main() {
 		},
 	}
 
-	aiClient, err := googlegenai.NewClient(ctx, toolConfigs)
+	storageClient, err := storage.NewClient(ctx)
+	if err != nil {
+		log.Fatalf("failed to create storage client: %v", err)
+	}
+
+	aiClient, err := googlegenai.NewClient(ctx, toolConfigs, storageClient)
 	if err != nil {
 		log.Fatalf("failed to create Google GenAI client: %v", err)
 	}
