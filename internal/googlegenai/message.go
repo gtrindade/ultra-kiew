@@ -8,6 +8,7 @@ import (
 	"google.golang.org/genai"
 )
 
+// SendMessageWithFile sends a message with a file to the chat and returns the response text.
 func (c *Client) SendMessageWithFile(ctx context.Context, spellName string, filePath string) (string, error) {
 	var err error
 	chat, err := c.NewChat(ctx, 0)
@@ -47,6 +48,25 @@ func (c *Client) SendMessageWithFile(ctx context.Context, spellName string, file
 	return result.Text(), nil
 }
 
+// SendMessageWithParts sends a message with multiple parts to the chat and returns the response text.
+func (c *Client) SendMessageWithParts(ctx context.Context, chatID int, parts []*genai.Part) (string, error) {
+	var err error
+	chat, exists := c.chats[chatID]
+	if !exists {
+		chat, err = c.NewChat(ctx, chatID)
+		if err != nil {
+			return "", fmt.Errorf("failed to create new chat: %w", err)
+		}
+	}
+	result, err := chat.Send(ctx, parts...)
+	if err != nil {
+		return "", err
+	}
+
+	return result.Text(), nil
+}
+
+// SendMessage sends a text message to the chat and handles any function calls that may be triggered.
 func (c *Client) SendMessage(ctx context.Context, chatID int, text string) (string, error) {
 	var err error
 	chat, exists := c.chats[chatID]
@@ -56,10 +76,8 @@ func (c *Client) SendMessage(ctx context.Context, chatID int, text string) (stri
 			return "", fmt.Errorf("failed to create new chat: %w", err)
 		}
 	}
-	part := genai.Part{
-		Text: text,
-	}
-	result, err := chat.SendMessage(ctx, part)
+	result, err := chat.Send(ctx, genai.NewPartFromText(text))
+
 	if err != nil {
 		return "", err
 	}
@@ -77,7 +95,7 @@ func (c *Client) SendMessage(ctx context.Context, chatID int, text string) (stri
 			fmt.Printf("Error executing function %s: %v\n", call.Name, err)
 			continue
 		}
-		response := genai.Part{
+		response := &genai.Part{
 			FunctionResponse: &genai.FunctionResponse{
 				Name: call.Name,
 				Response: map[string]any{
@@ -85,7 +103,7 @@ func (c *Client) SendMessage(ctx context.Context, chatID int, text string) (stri
 				},
 			},
 		}
-		finalResult, err := chat.SendMessage(ctx, response)
+		finalResult, err := chat.Send(ctx, response)
 		if err != nil {
 			fmt.Printf("Error sending function response for %s: %v\n", call.Name, err)
 			continue

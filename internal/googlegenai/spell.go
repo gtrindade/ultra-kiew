@@ -11,9 +11,9 @@ import (
 
 const (
 	// SpellLookup is the name of the tool that sends a message with a file.
-	SpellLookup = "spell_lookup"
+	SpellLookupToolName = "spell_lookup"
 
-	SpellCompendium = "Spell Compendium.pdf"
+	SpellCompendium = "spell-compendium.pdf"
 )
 
 var (
@@ -21,7 +21,7 @@ var (
 	SpellLookupTool = &genai.Tool{
 		FunctionDeclarations: []*genai.FunctionDeclaration{
 			{
-				Name:        SpellLookup,
+				Name:        SpellLookupToolName,
 				Description: "Provide descriptions for spells",
 				Parameters: &genai.Schema{
 					Type: "object",
@@ -39,7 +39,8 @@ var (
 	}
 )
 
-func (c *Client) SpellLookup(ctx context.Context, args map[string]any) (string, error) {
+func (c *Client) SpellLookup(args map[string]any) (string, error) {
+	ctx := context.Background()
 	spellName, ok := args["spellName"].(string)
 	if !ok {
 		return "", fmt.Errorf("invalid argument: spellName is required")
@@ -47,10 +48,10 @@ func (c *Client) SpellLookup(ctx context.Context, args map[string]any) (string, 
 
 	fmt.Printf("Looking up spell: %q\n", spellName)
 
-	spellCompendium, err := c.GetFile(ctx, SpellCompendium)
+	spellCompendium, err := c.GetFile(ctx, c.fileMap[SpellCompendium].Name)
 	if err != nil {
 		filePath := path.Join(storage.BasePath, storage.PDFsPath, SpellCompendium)
-		err = c.UploadFile(ctx, filePath, SpellCompendium, "application/pdf")
+		_, err = c.UploadFile(ctx, filePath, SpellCompendium)
 		if err != nil {
 			return "", fmt.Errorf("failed to upload spell compendium: %w", err)
 		}
@@ -65,9 +66,9 @@ func (c *Client) SpellLookup(ctx context.Context, args map[string]any) (string, 
 		genai.NewPartFromURI(spellCompendium.URI, "application/pdf"),
 	}
 
-	result, err := c.SendMessage(ctx, 0, parts...)
+	result, err := c.SendMessageWithParts(ctx, 0, parts)
 	if err != nil {
 		return "", err
 	}
-	return result.Text(), nil
+	return result, nil
 }

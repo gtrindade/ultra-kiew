@@ -15,8 +15,8 @@ const (
 	// PDFsPath is the path where PDF files are stored.
 	PDFsPath = "pdfs"
 
-	// ChatdataPath is the path where chat data is stored.
-	ChatDataPath = "chat_data"
+	// DBPath is the path where database files are stored.
+	DBPath = "db"
 )
 
 // Client provides a simple file-based storage system.
@@ -49,6 +49,14 @@ func (s *Client) Save(name string, data any) error {
 	return nil
 }
 
+func (s *Client) SaveAsync(name string, data any) {
+	go func() {
+		if err := s.Save(name, data); err != nil {
+			fmt.Printf("error saving file %s: %v\n", name, err)
+		}
+	}()
+}
+
 // Load loads data from a file with the specified name into the provided data structure.
 func (s *Client) Load(name string, data any) error {
 	s.RLock()
@@ -57,6 +65,10 @@ func (s *Client) Load(name string, data any) error {
 	filePath := filepath.Join(BasePath, name)
 	file, err := os.Open(filePath)
 	if err != nil {
+		if os.IsNotExist(err) {
+			fmt.Printf("file %s does not exist when trying to load it\n", filePath)
+			return nil
+		}
 		return fmt.Errorf("failed to open file %s: %w", filePath, err)
 	}
 	defer file.Close()
@@ -67,6 +79,14 @@ func (s *Client) Load(name string, data any) error {
 	}
 
 	return nil
+}
+
+func (c *Client) LoadFromDB(name string, data any) error {
+	return c.Load(filepath.Join(DBPath, name), data)
+}
+
+func (c *Client) SaveToDBAsync(name string, data any) {
+	c.SaveAsync(filepath.Join(DBPath, name), data)
 }
 
 // Delete removes the file with the specified name.

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path"
 	"path/filepath"
 	"sync"
 
@@ -35,7 +36,7 @@ type Client struct {
 	lock          sync.RWMutex
 	fileCache     map[string][]byte
 	storageClient *storage.Client
-	fileMap       map[string]*genai.File
+	fileMap       FileMap
 }
 
 // NewClient creates a new Google GenAI client with the provided API key and backend.
@@ -61,12 +62,17 @@ func NewClient(ctx context.Context, toolConfigs map[string]*ToolConfig, storageC
 		fileMap:       make(map[string]*genai.File),
 	}
 
+	err = c.LoadDB(ctx)
+	if err != nil {
+		return nil, err
+	}
+
 	err = c.AddTools(toolConfigs)
 	if err != nil {
 		return nil, err
 	}
 
-	err = c.UploadFiles(ctx)
+	err = c.UploadFiles(ctx, false)
 	if err != nil {
 		return nil, err
 	}
@@ -74,13 +80,27 @@ func NewClient(ctx context.Context, toolConfigs map[string]*ToolConfig, storageC
 	return c, nil
 }
 
+func (c *Client) LoadDB(ctx context.Context) error {
+	if c.storageClient == nil {
+		return errors.New("storage client is not initialized")
+	}
+
+	err := c.storageClient.LoadFromDB(filesFileName, &c.fileMap)
+	if err != nil {
+		return fmt.Errorf("failed to load database: %w", err)
+	}
+
+	fmt.Println("Database loaded successfully")
+	return nil
+}
+
 func (c *Client) AddTools(toolConfigs map[string]*ToolConfig) error {
-	c.toolConfigs[SpellLookup] = &ToolConfig{
+	c.toolConfigs[SpellLookupToolName] = &ToolConfig{
 		Function: c.SpellLookup,
 		Tool:     SpellLookupTool,
 	}
 
-	c.toolConfigs[ChatData] = &ToolConfig{
+	c.toolConfigs[ChatDataToolName] = &ToolConfig{
 		Function: c.ChatData,
 		Tool:     ChatDataTool,
 	}
@@ -103,14 +123,67 @@ func (c *Client) AddTools(toolConfigs map[string]*ToolConfig) error {
 	return nil
 }
 
-func (c *Client) UploadFiles(ctx context.Context) error {
-	err := c.UploadFile(ctx, filepath.Join("pdfs", SpellCompendium), "application/pdf")
+func (c *Client) UploadFiles(ctx context.Context, cleanup bool) error {
+	wg := sync.WaitGroup{}
+	errCh := make(chan error, 2)
+
+	files, err := c.ListFiles(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to upload spell compendium: %w", err)
+		return fmt.Errorf("failed to list files: %w", err)
 	}
-	err = c.UploadFile(ctx, ChatDataFile, "application/json")
-	if err != nil {
-		return fmt.Errorf("failed to upload chat data: %w", err)
+	if cleanup && files != nil {
+		for _, file := range files {
+			err = c.DeleteFile(ctx, file.Name)
+			if err != nil {
+				return fmt.Errorf("failed to delete file %s: %w", file.Name, err)
+			}
+		}
 	}
+
+	wg.Add(2)
+	go c.UploadFileIfNeeded(ctx, storage.PDFsPath, SpellCompendium, &wg, errCh)
+	go c.UploadFileIfNeeded(ctx, storage.DBPath, ChatDataFile, &wg, errCh)
+	wg.Wait()
+
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			return err
+		}
+	}
+
+	go c.storageClient.SaveToDBAsync(filesFileName, c.fileMap)
+
 	return nil
+}
+
+func (c *Client) UploadFileIfNeeded(ctx context.Context, dir, fileName string, wg *sync.WaitGroup, errCh chan error) {
+	defer wg.Done()
+
+	var needsUpload bool
+	file, ok := c.fileMap[fileName]
+	if !ok || file == nil {
+		fmt.Printf("File %s not found in cache, needs upload\n", fileName)
+		needsUpload = true
+	}
+
+	if file != nil {
+		_, err := c.GetFile(ctx, file.Name)
+		if err != nil {
+			fmt.Printf("File %s not found in GenAI, needs upload\n", fileName)
+			needsUpload = true
+		}
+	}
+
+	var err error
+	if needsUpload {
+		nameWithoutExt := fileName[:len(fileName)-len(filepath.Ext(fileName))]
+		file, err = c.UploadFile(ctx, path.Join(dir, fileName), nameWithoutExt)
+		if err != nil {
+			errCh <- fmt.Errorf("failed to upload file %s: %w", fileName, err)
+			return
+		}
+
+		c.fileMap[fileName] = file
+	}
 }

@@ -8,10 +8,10 @@ import (
 
 const (
 	// ChatData is the name of the tool that updates chat data.
-	ChatData = "chat_data"
+	ChatDataToolName = "chat_data"
 
 	// ChatDataFile is the name of the file where chat data is stored.
-	ChatDataFile = "chat_data.json"
+	ChatDataFile = "chat-data.json"
 )
 
 var (
@@ -35,26 +35,26 @@ var (
 	ChatDataTool = &genai.Tool{
 		FunctionDeclarations: []*genai.FunctionDeclaration{
 			{
-				Name: ChatData,
+				Name: ChatDataToolName,
 				Description: `Manages game character data. Use this to check or update character statistics.
-            Examples:
-            - "What is Hel's current HP?" -> get Hel.HP
-            - "Set Thif's AC to 19" -> set Thif.AC with value 19
-            - "Update Hel's health to 20" -> set Hel.HP with value 20
-            
-            Sample available characters and their properties:
-            - Hel: HP (health points), AC (armor class)
-            - Thif: HP (health points), AC (armor class)
-            
-            The data is structured as: character_name.property`,
+						Examples:
+						- "What is Hel's current HP?" -> get Hel.HP
+						- "Set Thif's AC to 19" -> set Thif.AC with value 19
+						- "Update Hel's health to 20" -> set Hel.HP with value 20
+						
+						Sample available characters and their properties:
+						- Hel: HP (health points), AC (armor class)
+						- Thif: HP (health points), AC (armor class)
+						
+						The data is structured as: character_name.property`,
 				Parameters: &genai.Schema{
 					Type: "object",
 					Properties: map[string]*genai.Schema{
 						"action": {
 							Type: "string",
 							Description: `The action to perform:
-                        - "get" when asking about current values
-                        - "set" when updating values`,
+													- "get" when asking about current values
+													- "set" when updating values`,
 							Example: "What is Hel's current HP?",
 							Enum:    validActions,
 						},
@@ -69,7 +69,7 @@ var (
 							Example:     "Hel's current HP is 25",
 						},
 					},
-					Required: []string{"action", "newData"},
+					Required: []string{"action", "path", "value"},
 				},
 			},
 		},
