@@ -9,6 +9,9 @@ import (
 const (
 	// ChatData is the name of the tool that updates chat data.
 	ChatData = "chat_data"
+
+	// ChatDataFile is the name of the file where chat data is stored.
+	ChatDataFile = "chat_data.json"
 )
 
 var (
@@ -104,5 +107,5 @@ func (c *Client) ChatData(args map[string]any) (string, error) {
 
 		return fmt.Sprintf("Chat data updated successfully: %v", tempChatData), nil
 	}
-
+	return "", fmt.Errorf("unknown action: %s", action)
 }

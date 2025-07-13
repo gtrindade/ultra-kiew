@@ -20,11 +20,7 @@ func main() {
 		},
 	}
 
-	storageClient, err := storage.NewClient(ctx)
-	if err != nil {
-		log.Fatalf("failed to create storage client: %v", err)
-	}
-
+	storageClient := storage.NewClient()
 	aiClient, err := googlegenai.NewClient(ctx, toolConfigs, storageClient)
 	if err != nil {
 		log.Fatalf("failed to create Google GenAI client: %v", err)
