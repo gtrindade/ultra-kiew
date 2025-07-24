@@ -51,19 +51,15 @@ func (c *Client) SpellLookup(args map[string]any) (string, error) {
 	spellCompendium, err := c.GetFile(ctx, c.fileMap[SpellCompendium].Name)
 	if err != nil {
 		filePath := path.Join(storage.BasePath, storage.PDFsPath, SpellCompendium)
-		_, err = c.UploadFile(ctx, filePath, SpellCompendium)
+		spellCompendium, err = c.UploadFile(ctx, filePath, SpellCompendium)
 		if err != nil {
 			return "", fmt.Errorf("failed to upload spell compendium: %w", err)
-		}
-		spellCompendium, err = c.GetFile(ctx, SpellCompendium)
-		if err != nil {
-			return "", fmt.Errorf("failed to get spell compendium: %w", err)
 		}
 	}
 
 	parts := []*genai.Part{
 		genai.NewPartFromText(fmt.Sprintf("Please provide the full description of the spell %q based on the following PDF:\n", spellName)),
-		genai.NewPartFromURI(spellCompendium.URI, "application/pdf"),
+		genai.NewPartFromURI(spellCompendium.URI, spellCompendium.MIMEType),
 	}
 
 	result, err := c.SendMessageWithParts(ctx, 0, parts)

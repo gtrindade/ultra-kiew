@@ -3,50 +3,10 @@ package googlegenai
 import (
 	"context"
 	"fmt"
-	"os"
 
+	"github.com/davecgh/go-spew/spew"
 	"google.golang.org/genai"
 )
-
-// SendMessageWithFile sends a message with a file to the chat and returns the response text.
-func (c *Client) SendMessageWithFile(ctx context.Context, spellName string, filePath string) (string, error) {
-	var err error
-	chat, err := c.NewChat(ctx, 0)
-	if err != nil {
-		return "", err
-	}
-
-	c.lock.RLock()
-	fileContent, found := c.fileCache[filePath]
-	c.lock.RUnlock()
-	if !found {
-		fileContent, err = os.ReadFile(filePath)
-		if err != nil {
-			return "", fmt.Errorf("failed to read file %s: %w", filePath, err)
-		}
-		fmt.Println("File content loaded from disk:", filePath)
-		c.lock.Lock()
-		c.fileCache[filePath] = fileContent
-		c.lock.Unlock()
-	} else {
-		fmt.Println("File content loaded from cache:", filePath)
-	}
-
-	parts := []genai.Part{{
-		InlineData: &genai.Blob{
-			MIMEType: "application/pdf",
-			Data:     fileContent,
-		}}, {
-		Text: fmt.Sprintf("Please provide the full description of the spell %q\n", spellName),
-	}}
-
-	result, err := chat.SendMessage(ctx, parts...)
-	if err != nil {
-		return "", err
-	}
-
-	return result.Text(), nil
-}
 
 // SendMessageWithParts sends a message with multiple parts to the chat and returns the response text.
 func (c *Client) SendMessageWithParts(ctx context.Context, chatID int, parts []*genai.Part) (string, error) {
@@ -83,6 +43,7 @@ func (c *Client) SendMessage(ctx context.Context, chatID int, text string) (stri
 	}
 	functionCalls := result.FunctionCalls()
 
+	var response []*genai.Part
 	for _, call := range functionCalls {
 		toolConfig, exists := c.toolConfigs[call.Name]
 		if !exists {
@@ -95,7 +56,8 @@ func (c *Client) SendMessage(ctx context.Context, chatID int, text string) (stri
 			fmt.Printf("Error executing function %s: %v\n", call.Name, err)
 			continue
 		}
-		response := &genai.Part{
+		spew.Dump(functionResult)
+		part := &genai.Part{
 			FunctionResponse: &genai.FunctionResponse{
 				Name: call.Name,
 				Response: map[string]any{
@@ -103,13 +65,18 @@ func (c *Client) SendMessage(ctx context.Context, chatID int, text string) (stri
 				},
 			},
 		}
-		finalResult, err := chat.Send(ctx, response)
-		if err != nil {
-			fmt.Printf("Error sending function response for %s: %v\n", call.Name, err)
-			continue
-		}
-		result = finalResult
+		response = append(response, part)
 	}
 
-	return result.Text(), nil
+	if len(response) == 0 {
+		// No function calls, return the text response directly
+		return result.Text(), nil
+	}
+	var finalResponse *genai.GenerateContentResponse
+	finalResponse, err = chat.Send(ctx, response...)
+	if err != nil {
+		return "", err
+	}
+
+	return finalResponse.Text(), nil
 }

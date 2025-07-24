@@ -17,8 +17,6 @@ import (
 const (
 	// Model is the default model used for generating content.
 	Model = "gemini-2.0-flash"
-	// Backend is the default backend for Google GenAI.
-	Backend = "gemini-api"
 )
 
 type GenericFunction func(args map[string]any) (string, error)
@@ -29,14 +27,15 @@ type ToolConfig struct {
 }
 
 type Client struct {
-	client        *genai.Client
-	config        *genai.GenerateContentConfig
-	chats         map[int]*genai.Chat
-	toolConfigs   map[string]*ToolConfig
-	lock          sync.RWMutex
-	fileCache     map[string][]byte
-	storageClient *storage.Client
-	fileMap       FileMap
+	client      *genai.Client
+	config      *genai.GenerateContentConfig
+	chats       map[int]*genai.Chat
+	toolConfigs map[string]*ToolConfig
+	lock        sync.RWMutex
+	fileCache   map[string][]byte
+	storage     *storage.Client
+	fileMap     FileMap
+	chatData    map[string]string
 }
 
 // NewClient creates a new Google GenAI client with the provided API key and backend.
@@ -54,12 +53,13 @@ func NewClient(ctx context.Context, toolConfigs map[string]*ToolConfig, storageC
 	}
 
 	c := &Client{
-		chats:         make(map[int]*genai.Chat),
-		client:        client,
-		toolConfigs:   toolConfigs,
-		fileCache:     make(map[string][]byte),
-		storageClient: storageClient,
-		fileMap:       make(map[string]*genai.File),
+		chats:       make(map[int]*genai.Chat),
+		client:      client,
+		toolConfigs: toolConfigs,
+		fileCache:   make(map[string][]byte),
+		storage:     storageClient,
+		fileMap:     make(map[string]*genai.File),
+		chatData:    make(map[string]string),
 	}
 
 	err = c.LoadDB(ctx)
@@ -81,13 +81,18 @@ func NewClient(ctx context.Context, toolConfigs map[string]*ToolConfig, storageC
 }
 
 func (c *Client) LoadDB(ctx context.Context) error {
-	if c.storageClient == nil {
+	if c.storage == nil {
 		return errors.New("storage client is not initialized")
 	}
 
-	err := c.storageClient.LoadFromDB(filesFileName, &c.fileMap)
+	err := c.storage.LoadFromDB(filesFileName, &c.fileMap)
 	if err != nil {
 		return fmt.Errorf("failed to load database: %w", err)
+	}
+
+	err = c.storage.LoadFromDB(ChatDataFile, &c.chatData)
+	if err != nil {
+		return fmt.Errorf("failed to load chat data: %w", err)
 	}
 
 	fmt.Println("Database loaded successfully")
@@ -152,7 +157,7 @@ func (c *Client) UploadFiles(ctx context.Context, cleanup bool) error {
 		}
 	}
 
-	go c.storageClient.SaveToDBAsync(filesFileName, c.fileMap)
+	go c.storage.SaveToDBAsync(filesFileName, c.fileMap)
 
 	return nil
 }

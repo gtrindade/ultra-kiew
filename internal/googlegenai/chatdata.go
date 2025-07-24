@@ -1,8 +1,11 @@
 package googlegenai
 
 import (
+	"encoding/json"
 	"fmt"
+	"strings"
 
+	"github.com/davecgh/go-spew/spew"
 	"google.golang.org/genai"
 )
 
@@ -14,62 +17,66 @@ const (
 	ChatDataFile = "chat-data.json"
 )
 
-var (
-	tempChatData = map[string]any{
-		"Hel": map[string]any{
-			"HP": 25,
-			"AC": 17,
-		},
-		"Thif": map[string]any{
-			"HP": 30,
-			"AC": 18,
-		},
-	}
-)
+type InventoryItem struct {
+	Value    string `json:"value"`
+	Quantity int    `json:"quantity"`
+}
 
 var (
 	actionGet    = "get"
 	actionSet    = "set"
-	validActions = []string{actionGet, actionSet}
+	actionAdd    = "add"
+	actionRemove = "remove"
+	actionDelete = "delete"
+	validActions = []string{actionGet, actionSet, actionAdd, actionRemove, actionDelete}
 	// ChatDataTool is the tool for managing chat data.
 	ChatDataTool = &genai.Tool{
 		FunctionDeclarations: []*genai.FunctionDeclaration{
 			{
 				Name: ChatDataToolName,
-				Description: `Manages game character data. Use this to check or update character statistics.
-						Examples:
-						- "What is Hel's current HP?" -> get Hel.HP
-						- "Set Thif's AC to 19" -> set Thif.AC with value 19
-						- "Update Hel's health to 20" -> set Hel.HP with value 20
+				Description: `Universal character data management system that stores and retrieves any property for any character.
 						
-						Sample available characters and their properties:
-						- Hel: HP (health points), AC (armor class)
-						- Thif: HP (health points), AC (armor class)
+						Structure:
+						- Data points are accessed using character.property notation
+						- Both character and property are case-sensitive identifiers
+						- No spaces or special characters are allowed in either part
+						- The dot (.) is the only separator between character and property
+						- All properties should always be lower case
 						
-						The data is structured as: character_name.property`,
+						Operations:
+						- get: Retrieves the current value of any property for any character
+						- set: Updates or creates any property for any character with a new value
+						- add: Appends a value to an existing property for a character
+						- remove: Removes a value from a property for a character
+						- delete: Deletes a property or character completely, removing all associated data
+
+						Properties can represent any character attribute, statistic, or information.
+						There are no restrictions on property names - any valid identifier can be used.
+						New characters and properties are automatically created when setting values.`,
 				Parameters: &genai.Schema{
 					Type: "object",
 					Properties: map[string]*genai.Schema{
 						"action": {
 							Type: "string",
-							Description: `The action to perform:
-													- "get" when asking about current values
-													- "set" when updating values`,
-							Example: "What is Hel's current HP?",
-							Enum:    validActions,
+							Description: `Action to perform:
+							- "get": retrieve a value
+							- "set": store a value
+							- "add": will append a value to a property
+							- "remove": will remove a value from a property
+							- "delete": will remove the property or character completely
+							`,
+							Enum: validActions,
 						},
 						"path": {
 							Type:        "string",
-							Description: "The path to the chat data to get or set",
-							Example:     "Hel.HP",
+							Description: "Access path in format character.property using valid identifiers without spaces or special characters",
 						},
 						"value": {
 							Type:        "string",
-							Description: "The new value for given path",
-							Example:     "Hel's current HP is 25",
+							Description: "New value to store when using set action (required for set, ignored for get)",
 						},
 					},
-					Required: []string{"action", "path", "value"},
+					Required: []string{"action", "path"},
 				},
 			},
 		},
@@ -86,6 +93,8 @@ func isValidAction(action string) bool {
 }
 
 func (c *Client) ChatData(args map[string]any) (string, error) {
+	spew.Dump(args)
+
 	action, ok := args["action"].(string)
 	if !ok {
 		return "", fmt.Errorf("invalid argument: action is required")
@@ -94,18 +103,98 @@ func (c *Client) ChatData(args map[string]any) (string, error) {
 		return "", fmt.Errorf("invalid action: %s, must be one of %v", action, validActions)
 	}
 
+	path, ok := args["path"].(string)
+	if !ok {
+		return "", fmt.Errorf("invalid argument: path is required")
+	}
+
+	value, ok := args["value"].(string)
+	if !ok && action != actionGet && action != actionRemove && action != actionDelete {
+		return "", fmt.Errorf("invalid argument: value is required when action is 'add'")
+	}
+
+	fmt.Printf("Performing action: %q with path: %s and value: %s\n", action, path, value)
 	switch action {
 	case actionGet:
-		fmt.Printf("Performing action: %q", action)
-		return fmt.Sprintf("Current chat data: %v", tempChatData), nil
+		return c.chatData[path], nil
 	case actionSet:
-		newData, ok := args["newData"].(string)
-		if !ok && action == actionSet {
-			return "", fmt.Errorf("invalid argument: newData is required when action is 'set'")
+		c.chatData[path] = value
+		c.storage.SaveToDBAsync(ChatDataFile, c.chatData)
+		return fmt.Sprintf("Set %s to %s", path, value), nil
+	case actionAdd:
+		var msg string
+		if existingValue, exists := c.chatData[path]; exists {
+			var parsedValue []InventoryItem
+			if err := json.Unmarshal([]byte(existingValue), &parsedValue); err != nil {
+				return "", fmt.Errorf("failed to parse existing value for %s: %w", path, err)
+			}
+			added := false
+			for i, v := range parsedValue {
+				if v.Value == value {
+					parsedValue[i].Quantity++
+					msg = fmt.Sprintf("Incremented quantity of %s to %d in %s", value, parsedValue[i].Quantity, path)
+					added = true
+				}
+			}
+			if !added {
+				parsedValue = append(parsedValue, InventoryItem{Value: value, Quantity: 1})
+				msg = fmt.Sprintf("Added %s to %s with quantity 1", value, path)
+			}
+			finalValue, err := json.Marshal(parsedValue)
+			if err != nil {
+				return "", fmt.Errorf("failed to marshal updated value for %s: %w", path, err)
+			}
+			c.chatData[path] = string(finalValue)
+		} else {
+			stringValue, err := json.Marshal([]InventoryItem{{Value: value, Quantity: 1}})
+			if err != nil {
+				return "", fmt.Errorf("failed to marshal new value for %s: %w", path, err)
+			}
+			c.chatData[path] = string(stringValue)
+			msg = fmt.Sprintf("Added %s to %s with quantity 1", value, path)
 		}
-		fmt.Printf("Performing action: %q with data: %q\n", action, newData)
-
-		return fmt.Sprintf("Chat data updated successfully: %v", tempChatData), nil
+		c.storage.SaveToDBAsync(ChatDataFile, c.chatData)
+		return msg, nil
+	case actionRemove:
+		if existingValue, exists := c.chatData[path]; exists {
+			var parsedValue []InventoryItem
+			if err := json.Unmarshal([]byte(existingValue), &parsedValue); err != nil {
+				return "", fmt.Errorf("failed to parse existing value for %s: %w", path, err)
+			}
+			var msg string
+			for i, v := range parsedValue {
+				if v.Value == value {
+					if v.Quantity > 1 {
+						v.Quantity--
+						parsedValue[i] = v
+						c.chatData[path] = string(existingValue)
+						msg = fmt.Sprintf("Decremented quantity of %s to %d in %s", value, v.Quantity, path)
+					} else {
+						parsedValue = append(parsedValue[:i], parsedValue[i+1:]...)
+						c.chatData[path] = string(existingValue)
+						msg = fmt.Sprintf("Removed %s from %s", value, path)
+					}
+					c.storage.SaveToDBAsync(ChatDataFile, c.chatData)
+					return msg, nil
+				}
+			}
+			return fmt.Sprintf("%s not found in %s", value, path), nil
+		}
+		return fmt.Sprintf("%s is empty", path), nil
+	case actionDelete:
+		var deleted bool
+		for key := range c.chatData {
+			if strings.HasPrefix(key, path+".") || key == path {
+				delete(c.chatData, key)
+				deleted = true
+			}
+		}
+		c.storage.SaveToDBAsync(ChatDataFile, c.chatData)
+		if !deleted {
+			return fmt.Sprintf("%s does not exist", path), nil
+		}
+		return fmt.Sprintf("Deleted character %s and all its properties", path), nil
+	default:
+		return "", fmt.Errorf("unknown action: %s, must be one of %v", action, validActions)
 	}
-	return "", fmt.Errorf("unknown action: %s", action)
 }
