@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/davecgh/go-spew/spew"
 	"google.golang.org/genai"
 )
 
@@ -170,8 +169,6 @@ func (c *Client) saveChatData(chatID int64, data map[string]string) {
 }
 
 func (c *Client) ChatData(args map[string]any) (string, error) {
-	spew.Dump(args)
-
 	chatID, err := getNumber[int64](args["chatID"])
 	if err != nil {
 		return "", fmt.Errorf("invalid argument: chatID is missing or not a number")

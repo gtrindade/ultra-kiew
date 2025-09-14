@@ -3,7 +3,6 @@ module github.com/gtrindade/ultra-kiew
 go 1.24.2
 
 require (
-	github.com/davecgh/go-spew v1.1.1
 	github.com/go-telegram/bot v1.15.0
 	github.com/justinian/dice v1.0.3
 	google.golang.org/genai v1.12.0
