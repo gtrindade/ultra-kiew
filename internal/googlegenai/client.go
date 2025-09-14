@@ -7,19 +7,19 @@ import (
 	"log"
 	"os"
 	"path"
+	"path/filepath"
 	"sync"
 
+	"github.com/gtrindade/ultra-kiew/internal/storage"
 	"google.golang.org/genai"
 )
 
 const (
-	// SpellLookup is the name of the tool that sends a message with a file.
-	SpellLookup = "spell_lookup"
 	// Model is the default model used for generating content.
 	Model = "gemini-2.0-flash"
-	// Backend is the default backend for Google GenAI.
-	Backend  = "gemini-api"
-	filePath = "data"
+
+	// CLEANUP indicates whether to clean up existing files before uploading new ones.
+	CLEANUP = false
 )
 
 type GenericFunction func(args map[string]any) (string, error)
@@ -32,14 +32,17 @@ type ToolConfig struct {
 type Client struct {
 	client      *genai.Client
 	config      *genai.GenerateContentConfig
-	chats       map[int]*genai.Chat
+	chats       map[int64]*genai.Chat
 	toolConfigs map[string]*ToolConfig
 	lock        sync.RWMutex
 	fileCache   map[string][]byte
+	storage     *storage.Client
+	fileMap     FileMap
+	chatData    map[int64]map[string]string
 }
 
 // NewClient creates a new Google GenAI client with the provided API key and backend.
-func NewClient(ctx context.Context, toolConfigs map[string]*ToolConfig) (*Client, error) {
+func NewClient(ctx context.Context, toolConfigs map[string]*ToolConfig, storageClient *storage.Client) (*Client, error) {
 	apiKey := os.Getenv("GEMINI_API_KEY")
 	if apiKey == "" {
 		log.Fatal("GEMINI_API_KEY environment variable is not set")
@@ -53,24 +56,65 @@ func NewClient(ctx context.Context, toolConfigs map[string]*ToolConfig) (*Client
 	}
 
 	c := &Client{
-		chats:       make(map[int]*genai.Chat),
+		chats:       make(map[int64]*genai.Chat),
 		client:      client,
 		toolConfigs: toolConfigs,
 		fileCache:   make(map[string][]byte),
+		storage:     storageClient,
+		fileMap:     make(map[string]*genai.File),
+		chatData:    make(map[int64]map[string]string),
 	}
 
-	toolConfigs[SpellLookup] = &ToolConfig{
+	err = c.LoadDB(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	err = c.AddTools(toolConfigs)
+	if err != nil {
+		return nil, err
+	}
+
+	err = c.UploadFiles(ctx, CLEANUP)
+	if err != nil {
+		return nil, err
+	}
+
+	return c, nil
+}
+
+func (c *Client) LoadDB(ctx context.Context) error {
+	if c.storage == nil {
+		return errors.New("storage client is not initialized")
+	}
+
+	err := c.storage.LoadFromDB(filesFileName, &c.fileMap)
+	if err != nil {
+		return fmt.Errorf("failed to load database: %w", err)
+	}
+
+	fmt.Println("Database loaded successfully")
+	return nil
+}
+
+func (c *Client) AddTools(toolConfigs map[string]*ToolConfig) error {
+	c.toolConfigs[SpellLookupToolName] = &ToolConfig{
 		Function: c.SpellLookup,
-		Tool:     SpellLookupTool(),
+		Tool:     SpellLookupTool,
+	}
+
+	c.toolConfigs[ChatDataToolName] = &ToolConfig{
+		Function: c.ChatData,
+		Tool:     ChatDataTool,
 	}
 
 	tools := make([]*genai.Tool, 0, len(toolConfigs))
 	for name, toolConfig := range toolConfigs {
 		if toolConfig == nil || toolConfig.Tool == nil {
-			return nil, errors.New("tool configuration for " + name + " is missing or invalid")
+			return errors.New("tool configuration for " + name + " is missing or invalid")
 		}
 		if toolConfig.Function == nil {
-			return nil, errors.New("function for tool " + name + " is not defined")
+			return errors.New("function for tool " + name + " is not defined")
 		}
 		tools = append(tools, toolConfig.Tool)
 	}
@@ -79,145 +123,76 @@ func NewClient(ctx context.Context, toolConfigs map[string]*ToolConfig) (*Client
 		Tools: tools,
 	}
 
-	return c, nil
+	return nil
 }
 
-func (c *Client) NewChat(ctx context.Context, chatID int) (*genai.Chat, error) {
-	chat, err := c.client.Chats.Create(ctx, Model, c.config, nil)
+func (c *Client) UploadFiles(ctx context.Context, cleanup bool) error {
+	wg := sync.WaitGroup{}
+	errCh := make(chan error, 2)
+
+	files, err := c.ListFiles(ctx)
 	if err != nil {
-		return nil, err
+		return fmt.Errorf("failed to list files: %w", err)
 	}
-	if chatID != 0 {
-		c.chats[chatID] = chat
+	if cleanup && files != nil {
+		for _, file := range files {
+			fmt.Printf("Deleting file: %s\n", file.Name)
+			err = c.DeleteFile(ctx, file.Name)
+			if err != nil {
+				return fmt.Errorf("failed to delete file %s: %w", file.Name, err)
+			}
+		}
 	}
-	return chat, nil
+
+	wg.Add(1)
+	go c.UploadFileIfNeeded(ctx, storage.PDFsPath, SpellCompendium, &wg, errCh)
+	wg.Wait()
+
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			return err
+		}
+	}
+
+	c.storage.SaveToDBAsync(filesFileName, c.fileMap)
+
+	return nil
 }
 
-func (c *Client) GetChat(ctx context.Context, chatID int) (*genai.Chat, error) {
-	chat, exists := c.chats[chatID]
-	if !exists {
-		return c.NewChat(ctx, chatID)
-	}
-	return chat, nil
-}
+func (c *Client) UploadFileIfNeeded(ctx context.Context, dir, fileName string, wg *sync.WaitGroup, errCh chan error) {
+	defer wg.Done()
 
-func (c *Client) SpellLookup(args map[string]any) (string, error) {
-	spellName, ok := args["spellName"].(string)
-	if !ok {
-		return "", fmt.Errorf("invalid argument: spellName is required")
-	}
-
-	fmt.Printf("Looking up spell: %q\n", spellName)
-
-	return c.SendMessageWithFile(context.Background(), spellName, "Spell Compendium.pdf")
-}
-
-func (c *Client) SendMessageWithFile(ctx context.Context, spellName string, filePath string) (string, error) {
-	var err error
-	chat, err := c.NewChat(ctx, 0)
-	if err != nil {
-		return "", err
-	}
+	var needsUpload bool
 
 	c.lock.RLock()
-	fileContent, found := c.fileCache[filePath]
+	file, ok := c.fileMap[fileName]
 	c.lock.RUnlock()
-	if !found {
-		fileContent, err = os.ReadFile(path.Join("data", filePath))
+	if !ok || file == nil {
+		fmt.Printf("File %s not found in cache, needs upload\n", fileName)
+		needsUpload = true
+	}
+
+	if file != nil {
+		_, err := c.GetFile(ctx, file.Name)
 		if err != nil {
-			return "", fmt.Errorf("failed to read file %s: %w", filePath, err)
+			fmt.Printf("File %s not found in GenAI, needs upload\n", fileName)
+			needsUpload = true
 		}
-		fmt.Println("File content loaded from disk:", filePath)
-		c.lock.Lock()
-		c.fileCache[filePath] = fileContent
-		c.lock.Unlock()
-	} else {
-		fmt.Println("File content loaded from cache:", filePath)
 	}
 
-	parts := []genai.Part{{
-		InlineData: &genai.Blob{
-			MIMEType: "application/pdf",
-			Data:     fileContent,
-		}}, {
-		Text: fmt.Sprintf("Please provide the full description of the spell %q\n", spellName),
-	}}
-
-	result, err := chat.SendMessage(ctx, parts...)
-	if err != nil {
-		return "", err
-	}
-
-	return result.Text(), nil
-}
-
-func (c *Client) SendMessage(ctx context.Context, chatID int, text string) (string, error) {
 	var err error
-	chat, exists := c.chats[chatID]
-	if !exists {
-		chat, err = c.NewChat(ctx, chatID)
+	if needsUpload {
+		nameWithoutExt := fileName[:len(fileName)-len(filepath.Ext(fileName))]
+		file, err = c.UploadFile(ctx, path.Join(dir, fileName), nameWithoutExt)
 		if err != nil {
-			return "", fmt.Errorf("failed to create new chat: %w", err)
+			errCh <- fmt.Errorf("failed to upload file %s: %w", fileName, err)
+			return
 		}
-	}
-	part := genai.Part{
-		Text: text,
-	}
-	result, err := chat.SendMessage(ctx, part)
-	if err != nil {
-		return "", err
-	}
-	functionCalls := result.FunctionCalls()
+		fmt.Printf("File %s uploaded successfully (%s)\n", fileName, file.Name)
 
-	for _, call := range functionCalls {
-		toolConfig, exists := c.toolConfigs[call.Name]
-		if !exists {
-			fmt.Println("Tool configuration for", call.Name, "not found")
-			continue
-		}
-
-		functionResult, err := toolConfig.Function(call.Args)
-		if err != nil {
-			fmt.Printf("Error executing function %s: %v\n", call.Name, err)
-			continue
-		}
-		response := genai.Part{
-			FunctionResponse: &genai.FunctionResponse{
-				Name: call.Name,
-				Response: map[string]any{
-					"result": functionResult,
-				},
-			},
-		}
-		finalResult, err := chat.SendMessage(ctx, response)
-		if err != nil {
-			fmt.Printf("Error sending function response for %s: %v\n", call.Name, err)
-			continue
-		}
-		result = finalResult
-	}
-
-	return result.Text(), nil
-}
-
-func SpellLookupTool() *genai.Tool {
-	return &genai.Tool{
-		FunctionDeclarations: []*genai.FunctionDeclaration{
-			{
-				Name:        SpellLookup,
-				Description: "Provide descriptions for spells",
-				Parameters: &genai.Schema{
-					Type: "object",
-					Properties: map[string]*genai.Schema{
-						"spellName": {
-							Type:        "string",
-							Description: "The spell name",
-							Example:     "What is the description for the spell Fireball?",
-						},
-					},
-					Required: []string{"spellName"},
-				},
-			},
-		},
+		c.lock.Lock()
+		c.fileMap[fileName] = file
+		c.lock.Unlock()
 	}
 }
