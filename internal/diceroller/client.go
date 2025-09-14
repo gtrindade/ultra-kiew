@@ -34,7 +34,7 @@ func GetToolConfig() *genai.Tool {
 		FunctionDeclarations: []*genai.FunctionDeclaration{
 			{
 				Name:        RollDice,
-				Description: "Rolls a dice",
+				Description: "Rolls a dice. Make sure to always provide the dice result and the total in a very concise way.",
 				Parameters: &genai.Schema{
 					Type: "object",
 					Properties: map[string]*genai.Schema{
