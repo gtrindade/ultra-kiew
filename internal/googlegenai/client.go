@@ -17,6 +17,9 @@ import (
 const (
 	// Model is the default model used for generating content.
 	Model = "gemini-2.0-flash"
+
+	// CLEANUP indicates whether to clean up existing files before uploading new ones.
+	CLEANUP = false
 )
 
 type GenericFunction func(args map[string]any) (string, error)
@@ -29,13 +32,13 @@ type ToolConfig struct {
 type Client struct {
 	client      *genai.Client
 	config      *genai.GenerateContentConfig
-	chats       map[int]*genai.Chat
+	chats       map[int64]*genai.Chat
 	toolConfigs map[string]*ToolConfig
 	lock        sync.RWMutex
 	fileCache   map[string][]byte
 	storage     *storage.Client
 	fileMap     FileMap
-	chatData    map[string]string
+	chatData    map[int64]map[string]string
 }
 
 // NewClient creates a new Google GenAI client with the provided API key and backend.
@@ -53,13 +56,13 @@ func NewClient(ctx context.Context, toolConfigs map[string]*ToolConfig, storageC
 	}
 
 	c := &Client{
-		chats:       make(map[int]*genai.Chat),
+		chats:       make(map[int64]*genai.Chat),
 		client:      client,
 		toolConfigs: toolConfigs,
 		fileCache:   make(map[string][]byte),
 		storage:     storageClient,
 		fileMap:     make(map[string]*genai.File),
-		chatData:    make(map[string]string),
+		chatData:    make(map[int64]map[string]string),
 	}
 
 	err = c.LoadDB(ctx)
@@ -72,7 +75,7 @@ func NewClient(ctx context.Context, toolConfigs map[string]*ToolConfig, storageC
 		return nil, err
 	}
 
-	err = c.UploadFiles(ctx, false)
+	err = c.UploadFiles(ctx, CLEANUP)
 	if err != nil {
 		return nil, err
 	}
@@ -88,11 +91,6 @@ func (c *Client) LoadDB(ctx context.Context) error {
 	err := c.storage.LoadFromDB(filesFileName, &c.fileMap)
 	if err != nil {
 		return fmt.Errorf("failed to load database: %w", err)
-	}
-
-	err = c.storage.LoadFromDB(ChatDataFile, &c.chatData)
-	if err != nil {
-		return fmt.Errorf("failed to load chat data: %w", err)
 	}
 
 	fmt.Println("Database loaded successfully")
@@ -138,6 +136,7 @@ func (c *Client) UploadFiles(ctx context.Context, cleanup bool) error {
 	}
 	if cleanup && files != nil {
 		for _, file := range files {
+			fmt.Printf("Deleting file: %s\n", file.Name)
 			err = c.DeleteFile(ctx, file.Name)
 			if err != nil {
 				return fmt.Errorf("failed to delete file %s: %w", file.Name, err)
@@ -145,9 +144,8 @@ func (c *Client) UploadFiles(ctx context.Context, cleanup bool) error {
 		}
 	}
 
-	wg.Add(2)
+	wg.Add(1)
 	go c.UploadFileIfNeeded(ctx, storage.PDFsPath, SpellCompendium, &wg, errCh)
-	go c.UploadFileIfNeeded(ctx, storage.DBPath, ChatDataFile, &wg, errCh)
 	wg.Wait()
 
 	close(errCh)
@@ -157,7 +155,7 @@ func (c *Client) UploadFiles(ctx context.Context, cleanup bool) error {
 		}
 	}
 
-	go c.storage.SaveToDBAsync(filesFileName, c.fileMap)
+	c.storage.SaveToDBAsync(filesFileName, c.fileMap)
 
 	return nil
 }
@@ -166,7 +164,10 @@ func (c *Client) UploadFileIfNeeded(ctx context.Context, dir, fileName string, w
 	defer wg.Done()
 
 	var needsUpload bool
+
+	c.lock.RLock()
 	file, ok := c.fileMap[fileName]
+	c.lock.RUnlock()
 	if !ok || file == nil {
 		fmt.Printf("File %s not found in cache, needs upload\n", fileName)
 		needsUpload = true
@@ -188,7 +189,10 @@ func (c *Client) UploadFileIfNeeded(ctx context.Context, dir, fileName string, w
 			errCh <- fmt.Errorf("failed to upload file %s: %w", fileName, err)
 			return
 		}
+		fmt.Printf("File %s uploaded successfully (%s)\n", fileName, file.Name)
 
+		c.lock.Lock()
 		c.fileMap[fileName] = file
+		c.lock.Unlock()
 	}
 }

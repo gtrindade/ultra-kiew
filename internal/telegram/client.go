@@ -58,11 +58,15 @@ func (c *Client) handler(ctx context.Context, b *bot.Bot, update *models.Update)
 	var response string
 	var err error
 
+	if update == nil || update.Message == nil {
+		return
+	}
+
 	text := update.Message.Text
 	switch {
 	case strings.HasPrefix(text, botUsername) || update.Message.Chat.Type == models.ChatTypePrivate:
 		text = strings.TrimPrefix(text, botUsername)
-		response, err = c.ai.SendMessage(ctx, 0, text)
+		response, err = c.ai.SendMessage(ctx, update.Message.Chat.ID, text)
 	default:
 		return
 	}

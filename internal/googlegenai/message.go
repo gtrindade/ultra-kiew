@@ -4,12 +4,11 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/davecgh/go-spew/spew"
 	"google.golang.org/genai"
 )
 
 // SendMessageWithParts sends a message with multiple parts to the chat and returns the response text.
-func (c *Client) SendMessageWithParts(ctx context.Context, chatID int, parts []*genai.Part) (string, error) {
+func (c *Client) SendMessageWithParts(ctx context.Context, chatID int64, parts []*genai.Part) (string, error) {
 	var err error
 	chat, exists := c.chats[chatID]
 	if !exists {
@@ -27,7 +26,7 @@ func (c *Client) SendMessageWithParts(ctx context.Context, chatID int, parts []*
 }
 
 // SendMessage sends a text message to the chat and handles any function calls that may be triggered.
-func (c *Client) SendMessage(ctx context.Context, chatID int, text string) (string, error) {
+func (c *Client) SendMessage(ctx context.Context, chatID int64, text string) (string, error) {
 	var err error
 	chat, exists := c.chats[chatID]
 	if !exists {
@@ -36,47 +35,54 @@ func (c *Client) SendMessage(ctx context.Context, chatID int, text string) (stri
 			return "", fmt.Errorf("failed to create new chat: %w", err)
 		}
 	}
-	result, err := chat.Send(ctx, genai.NewPartFromText(text))
+	msg := fmt.Sprintf("%s. The chatID is %d", text, chatID)
+	fmt.Printf("[%q]\n", msg)
 
+	result, err := chat.Send(ctx, genai.NewPartFromText(msg))
 	if err != nil {
 		return "", err
 	}
 	functionCalls := result.FunctionCalls()
 
-	var response []*genai.Part
-	for _, call := range functionCalls {
-		toolConfig, exists := c.toolConfigs[call.Name]
-		if !exists {
-			fmt.Println("Tool configuration for", call.Name, "not found")
-			continue
-		}
+	for len(functionCalls) > 0 {
+		var response []*genai.Part
+		for _, call := range functionCalls {
+			toolConfig, exists := c.toolConfigs[call.Name]
+			if !exists {
+				fmt.Println("Tool configuration for", call.Name, "not found")
+				part := &genai.Part{
+					Text: fmt.Sprintf("Error: Tool configuration for %s not found", call.Name),
+				}
+				response = append(response, part)
+				continue
+			}
 
-		functionResult, err := toolConfig.Function(call.Args)
-		if err != nil {
-			fmt.Printf("Error executing function %s: %v\n", call.Name, err)
-			continue
-		}
-		spew.Dump(functionResult)
-		part := &genai.Part{
-			FunctionResponse: &genai.FunctionResponse{
-				Name: call.Name,
-				Response: map[string]any{
-					"result": functionResult,
+			functionResult, err := toolConfig.Function(call.Args)
+			if err != nil {
+				fmt.Printf("Error executing function %s: %v\n", call.Name, err)
+				part := &genai.Part{
+					Text: fmt.Sprintf("Error executing function %s: %v", call.Name, err),
+				}
+				response = append(response, part)
+				continue
+			}
+			part := &genai.Part{
+				FunctionResponse: &genai.FunctionResponse{
+					Name: call.Name,
+					Response: map[string]any{
+						"result": functionResult,
+					},
 				},
-			},
+			}
+			response = append(response, part)
 		}
-		response = append(response, part)
+
+		result, err = chat.Send(ctx, response...)
+		if err != nil {
+			return "", err
+		}
+		functionCalls = result.FunctionCalls()
 	}
 
-	if len(response) == 0 {
-		// No function calls, return the text response directly
-		return result.Text(), nil
-	}
-	var finalResponse *genai.GenerateContentResponse
-	finalResponse, err = chat.Send(ctx, response...)
-	if err != nil {
-		return "", err
-	}
-
-	return finalResponse.Text(), nil
+	return result.Text(), nil
 }

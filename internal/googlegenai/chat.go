@@ -6,7 +6,7 @@ import (
 	"google.golang.org/genai"
 )
 
-func (c *Client) NewChat(ctx context.Context, chatID int) (*genai.Chat, error) {
+func (c *Client) NewChat(ctx context.Context, chatID int64) (*genai.Chat, error) {
 	chat, err := c.client.Chats.Create(ctx, Model, c.config, nil)
 	if err != nil {
 		return nil, err
@@ -17,7 +17,7 @@ func (c *Client) NewChat(ctx context.Context, chatID int) (*genai.Chat, error) {
 	return chat, nil
 }
 
-func (c *Client) GetChat(ctx context.Context, chatID int) (*genai.Chat, error) {
+func (c *Client) GetChat(ctx context.Context, chatID int64) (*genai.Chat, error) {
 	chat, exists := c.chats[chatID]
 	if !exists {
 		return c.NewChat(ctx, chatID)

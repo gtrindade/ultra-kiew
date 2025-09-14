@@ -46,6 +46,8 @@ func (s *Client) Save(name string, data any) error {
 		return fmt.Errorf("failed to encode data to JSON: %w", err)
 	}
 
+	fmt.Printf("Data saved to file %s successfully\n", filePath)
+
 	return nil
 }
 
