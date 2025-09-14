@@ -10,15 +10,15 @@ import (
 )
 
 const (
-	// SpellLookup is the name of the tool that sends a message with a file.
-	SpellLookupToolName = "spell_lookup"
+	// SpellPDFLookupToolName is the name of the tool that sends a message with a file.
+	SpellPDFLookupToolName = "spell_lookup_pdf"
 
 	SpellCompendium = "spell-compendium.pdf"
 )
 
 var (
-	// SpellLookup is the name of the tool that provides spell descriptions.
-	SpellLookupTool = &genai.Tool{
+	// SpellPDFLookupTool is the name of the tool that provides spell descriptions.
+	SpellPDFLookupTool = &genai.Tool{
 		FunctionDeclarations: []*genai.FunctionDeclaration{
 			{
 				Name:        SpellLookupToolName,
@@ -39,7 +39,7 @@ var (
 	}
 )
 
-func (c *Client) SpellLookup(args map[string]any) (string, error) {
+func (c *Client) SpellLookupOnPDF(args map[string]any) (string, error) {
 	ctx := context.Background()
 	spellName, ok := args["spellName"].(string)
 	if !ok {
