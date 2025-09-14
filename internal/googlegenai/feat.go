@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	// FeatLookupName is the name of the tool that sends a message with a file.
+	// FeatLookupToolName is the name of the tool that sends a message with a file.
 	FeatLookupToolName = "feat_lookup"
 )
 
