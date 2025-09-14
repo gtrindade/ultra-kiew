@@ -14,7 +14,7 @@ const (
 )
 
 var (
-	// FeatLookup is the name of the tool that provides feat descriptions.
+	// FeatLookupTool is the name of the tool that provides feat descriptions.
 	FeatLookupTool = &genai.Tool{
 		FunctionDeclarations: []*genai.FunctionDeclaration{
 			{
@@ -60,43 +60,36 @@ func (c *Client) FeatLookup(args map[string]any) (string, error) {
 func formatFeatDescription(feat *mysql.Feat) string {
 	var desc strings.Builder
 
-	// Header with name
 	desc.WriteString(fmt.Sprintf("%s\n\n", feat.Name))
 
-	// Categories if present
 	if feat.Categories != "" {
 		desc.WriteString(fmt.Sprintf("Categories: %s\n\n", feat.Categories))
 	}
 
-	// Description
 	if feat.Description != "" {
 		desc.WriteString("Description:\n")
 		desc.WriteString(feat.Description)
 		desc.WriteString("\n\n")
 	}
 
-	// Benefit
 	if feat.Benefit != "" {
 		desc.WriteString("Benefit:\n")
 		desc.WriteString(feat.Benefit)
 		desc.WriteString("\n\n")
 	}
 
-	// Normal
 	if feat.Normal != "" {
 		desc.WriteString("Normal:\n")
 		desc.WriteString(feat.Normal)
 		desc.WriteString("\n\n")
 	}
 
-	// Special
 	if feat.Special != "" {
 		desc.WriteString("Special:\n")
 		desc.WriteString(feat.Special)
 		desc.WriteString("\n\n")
 	}
 
-	// Source
 	if feat.Source != "" {
 		desc.WriteString(fmt.Sprintf("Source: %s", feat.Source))
 	}

@@ -75,7 +75,7 @@ func (c *Client) GetFeatByName(name string) ([]*Feat, error) {
 	}
 
 	if len(feats) == 0 {
-		return nil, nil // No feats found
+		return nil, nil
 	}
 	return feats, nil
 }
