@@ -105,6 +105,10 @@ func (c *Client) AddTools(toolConfigs map[string]*ToolConfig) error {
 		Function: c.SpellLookup,
 		Tool:     SpellLookupTool,
 	}
+	c.toolConfigs[FeatLookupToolName] = &ToolConfig{
+		Function: c.FeatLookup,
+		Tool:     FeatLookupTool,
+	}
 
 	c.toolConfigs[ChatDataToolName] = &ToolConfig{
 		Function: c.ChatData,

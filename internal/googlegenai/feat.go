@@ -1,0 +1,105 @@
+package googlegenai
+
+import (
+	"fmt"
+	"strings"
+
+	"github.com/gtrindade/ultra-kiew/internal/mysql"
+	"google.golang.org/genai"
+)
+
+const (
+	// FeatLookupName is the name of the tool that sends a message with a file.
+	FeatLookupToolName = "feat_lookup"
+)
+
+var (
+	// FeatLookup is the name of the tool that provides feat descriptions.
+	FeatLookupTool = &genai.Tool{
+		FunctionDeclarations: []*genai.FunctionDeclaration{
+			{
+				Name:        FeatLookupToolName,
+				Description: "Provide descriptions for feats. If asked for a description of the feat, provide the full output of the function call.",
+				Parameters: &genai.Schema{
+					Type: "object",
+					Properties: map[string]*genai.Schema{
+						"featName": {
+							Type:        "string",
+							Description: "The feat name",
+							Example:     "What is the description for the feat Power Attack?",
+						},
+					},
+					Required: []string{"featName"},
+				},
+			},
+		},
+	}
+)
+
+func (c *Client) FeatLookup(args map[string]any) (string, error) {
+	featName, ok := args["featName"].(string)
+	if !ok {
+		return "", fmt.Errorf("invalid argument: featName is required")
+	}
+
+	fmt.Printf("Looking up feat: %q\n", featName)
+
+	feats, err := c.dbClient.GetFeatByName(featName)
+	if err != nil {
+		return "", fmt.Errorf("failed to get feat from database: %v", err)
+	}
+
+	results := ""
+	for _, feat := range feats {
+		results += formatFeatDescription(feat)
+	}
+
+	return results, nil
+}
+
+func formatFeatDescription(feat *mysql.Feat) string {
+	var desc strings.Builder
+
+	// Header with name
+	desc.WriteString(fmt.Sprintf("%s\n\n", feat.Name))
+
+	// Categories if present
+	if feat.Categories != "" {
+		desc.WriteString(fmt.Sprintf("Categories: %s\n\n", feat.Categories))
+	}
+
+	// Description
+	if feat.Description != "" {
+		desc.WriteString("Description:\n")
+		desc.WriteString(feat.Description)
+		desc.WriteString("\n\n")
+	}
+
+	// Benefit
+	if feat.Benefit != "" {
+		desc.WriteString("Benefit:\n")
+		desc.WriteString(feat.Benefit)
+		desc.WriteString("\n\n")
+	}
+
+	// Normal
+	if feat.Normal != "" {
+		desc.WriteString("Normal:\n")
+		desc.WriteString(feat.Normal)
+		desc.WriteString("\n\n")
+	}
+
+	// Special
+	if feat.Special != "" {
+		desc.WriteString("Special:\n")
+		desc.WriteString(feat.Special)
+		desc.WriteString("\n\n")
+	}
+
+	// Source
+	if feat.Source != "" {
+		desc.WriteString(fmt.Sprintf("Source: %s", feat.Source))
+	}
+
+	return desc.String()
+}
