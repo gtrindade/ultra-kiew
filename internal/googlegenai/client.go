@@ -19,6 +19,9 @@ const (
 	// Model is the default model used for generating content.
 	Model = "gemini-2.0-flash"
 
+	// UPLOAD_ENABLED indicates whether file upload is enabled.
+	UPLOAD_ENABLED = false
+
 	// CLEANUP indicates whether to clean up existing files before uploading new ones.
 	CLEANUP = false
 )
@@ -78,9 +81,11 @@ func NewClient(ctx context.Context, toolConfigs map[string]*ToolConfig, storageC
 		return nil, err
 	}
 
-	err = c.UploadFiles(ctx, CLEANUP)
-	if err != nil {
-		return nil, err
+	if UPLOAD_ENABLED {
+		err = c.UploadFiles(ctx, CLEANUP)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	return c, nil
@@ -101,6 +106,10 @@ func (c *Client) LoadDB(ctx context.Context) error {
 }
 
 func (c *Client) AddTools(toolConfigs map[string]*ToolConfig) error {
+	if c.toolConfigs == nil {
+		c.toolConfigs = make(map[string]*ToolConfig)
+	}
+
 	c.toolConfigs[SpellLookupToolName] = &ToolConfig{
 		Function: c.SpellLookup,
 		Tool:     SpellLookupTool,
@@ -109,7 +118,6 @@ func (c *Client) AddTools(toolConfigs map[string]*ToolConfig) error {
 		Function: c.FeatLookup,
 		Tool:     FeatLookupTool,
 	}
-
 	c.toolConfigs[ChatDataToolName] = &ToolConfig{
 		Function: c.ChatData,
 		Tool:     ChatDataTool,
