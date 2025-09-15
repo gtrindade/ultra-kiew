@@ -49,9 +49,17 @@ func (c *Client) FeatLookup(args map[string]any) (string, error) {
 		return "", fmt.Errorf("failed to get feat from database: %v", err)
 	}
 
+	if len(feats) == 0 {
+		return fmt.Sprintf("No feat found with the name %q", featName), nil
+	}
+
 	results := ""
 	for _, feat := range feats {
 		results += formatFeatDescription(feat)
+	}
+
+	if results == "" {
+		return fmt.Sprintf("No description found for the feat %q", featName), nil
 	}
 
 	return results, nil

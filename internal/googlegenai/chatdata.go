@@ -74,7 +74,7 @@ var (
 						},
 						"chatID": {
 							Type:        "integer",
-							Description: "Chat ID to associate with the data. It will always be available in the format at the end of the message.",
+							Description: "Chat ID to associate with the data. It will always be available in the format at the end of the message. You can only take the chatID from the end of the message, if there are multiple chatIDs, take the last one.",
 						},
 						"path": {
 							Type:        "string",

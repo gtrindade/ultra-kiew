@@ -106,6 +106,10 @@ func (c *Client) LoadDB(ctx context.Context) error {
 }
 
 func (c *Client) AddTools(toolConfigs map[string]*ToolConfig) error {
+	if c.toolConfigs == nil {
+		c.toolConfigs = make(map[string]*ToolConfig)
+	}
+
 	c.toolConfigs[SpellLookupToolName] = &ToolConfig{
 		Function: c.SpellLookup,
 		Tool:     SpellLookupTool,
@@ -114,7 +118,6 @@ func (c *Client) AddTools(toolConfigs map[string]*ToolConfig) error {
 		Function: c.FeatLookup,
 		Tool:     FeatLookupTool,
 	}
-
 	c.toolConfigs[ChatDataToolName] = &ToolConfig{
 		Function: c.ChatData,
 		Tool:     ChatDataTool,

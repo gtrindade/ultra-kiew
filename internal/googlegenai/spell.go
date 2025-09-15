@@ -49,9 +49,17 @@ func (c *Client) SpellLookup(args map[string]any) (string, error) {
 		return "", fmt.Errorf("failed to get spell from database: %v", err)
 	}
 
+	if len(spells) == 0 {
+		return fmt.Sprintf("No spell found with the name %q", spellName), nil
+	}
+
 	results := ""
 	for _, spell := range spells {
 		results += formatSpellDescription(spell)
+	}
+
+	if results == "" {
+		return fmt.Sprintf("The spell %q was found but has no description", spellName), nil
 	}
 
 	return results, nil
