@@ -27,6 +27,8 @@ func getDBConnection(dbConfig *config.DBConfig) (*sql.DB, error) {
 		return nil, fmt.Errorf("failed to ping database: %w", err)
 	}
 
+	fmt.Printf("Successfully connected to the database %s\n", dbConfig.Name)
+
 	return db, nil
 }
 

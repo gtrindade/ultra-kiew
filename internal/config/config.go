@@ -15,6 +15,7 @@ type DBConfig struct {
 }
 
 type Config struct {
+	BotName  string    `yaml:"bot_name"`
 	DNDTools *DBConfig `yaml:"dnd_tools"`
 	SRD      *DBConfig `yaml:"srd"`
 }

@@ -101,7 +101,7 @@ func (c *Client) LoadDB(ctx context.Context) error {
 		return fmt.Errorf("failed to load database: %w", err)
 	}
 
-	fmt.Println("Database loaded successfully")
+	fmt.Println("File database loaded successfully")
 	return nil
 }
 
@@ -117,6 +117,10 @@ func (c *Client) AddTools(toolConfigs map[string]*ToolConfig) error {
 	c.toolConfigs[FeatLookupToolName] = &ToolConfig{
 		Function: c.FeatLookup,
 		Tool:     FeatLookupTool,
+	}
+	c.toolConfigs[EquipmentLookupToolName] = &ToolConfig{
+		Function: c.EquipmentLookup,
+		Tool:     EquipmentLookupTool,
 	}
 	c.toolConfigs[ChatDataToolName] = &ToolConfig{
 		Function: c.ChatData,

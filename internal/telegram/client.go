@@ -10,19 +10,17 @@ import (
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
+	"github.com/gtrindade/ultra-kiew/internal/config"
 	"github.com/gtrindade/ultra-kiew/internal/googlegenai"
 )
 
-const (
-	botUsername = "@ultrakiewbot"
-)
-
 type Client struct {
-	bot *bot.Bot
-	ai  *googlegenai.Client
+	bot     *bot.Bot
+	ai      *googlegenai.Client
+	botName string
 }
 
-func NewBot(ai *googlegenai.Client) (*Client, error) {
+func NewBot(config *config.Config, ai *googlegenai.Client) (*Client, error) {
 	c := &Client{
 		ai: ai,
 	}
@@ -42,6 +40,7 @@ func NewBot(ai *googlegenai.Client) (*Client, error) {
 	}
 
 	c.bot = b
+	c.botName = config.BotName
 	return c, nil
 }
 
@@ -64,8 +63,8 @@ func (c *Client) handler(ctx context.Context, b *bot.Bot, update *models.Update)
 
 	text := update.Message.Text
 	switch {
-	case strings.HasPrefix(text, botUsername) || update.Message.Chat.Type == models.ChatTypePrivate:
-		text = strings.TrimPrefix(text, botUsername)
+	case strings.HasPrefix(text, c.botName) || update.Message.Chat.Type == models.ChatTypePrivate:
+		text = strings.TrimPrefix(text, c.botName)
 		response, err = c.ai.SendMessage(ctx, update.Message.Chat.ID, text)
 	default:
 		return
