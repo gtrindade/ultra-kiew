@@ -7,6 +7,7 @@ require (
 	github.com/go-telegram/bot v1.17.0
 	github.com/justinian/dice v1.0.3
 	google.golang.org/genai v1.24.0
+	gopkg.in/yaml.v2 v2.4.0
 )
 
 require (
