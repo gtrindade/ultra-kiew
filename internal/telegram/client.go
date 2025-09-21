@@ -61,7 +61,7 @@ func (c *Client) handler(ctx context.Context, b *bot.Bot, update *models.Update)
 	}
 
 	text := update.Message.Text
-	hasBotName := strings.Contains(text, c.botName)
+	hasBotName := strings.Contains(strings.ToLower(text), strings.ToLower(c.botName))
 	isChatPrivate := update.Message.Chat.Type == models.ChatTypePrivate
 	isReplyToBot := update.Message.ReplyToMessage != nil && update.Message.ReplyToMessage.From != nil && update.Message.ReplyToMessage.From.Username == c.botName
 	if !isChatPrivate && !hasBotName && !isReplyToBot {
