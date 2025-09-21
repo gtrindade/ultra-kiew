@@ -3,79 +3,59 @@ package mysql
 import (
 	"database/sql"
 	"fmt"
-	"os"
 
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/gtrindade/ultra-kiew/internal/config"
 )
 
-type DBConfig struct {
-	Host     string
-	Port     string
-	User     string
-	Password string
-	DBName   string
-}
-
 type Client struct {
-	config *DBConfig
-	db     *sql.DB
+	config   *config.Config
+	dndTools *sql.DB
+	srd      *sql.DB
 }
 
-func GetDBConfigFromEnv() (*DBConfig, error) {
-	config := &DBConfig{
-		Host:     os.Getenv("DB_HOST"),
-		Port:     os.Getenv("DB_PORT"),
-		User:     os.Getenv("DB_USER"),
-		Password: os.Getenv("DB_PASS"),
-		DBName:   os.Getenv("DB_NAME"),
-	}
-
-	if config.Port == "" {
-		config.Port = "3306"
-	}
-
-	if config.Host == "" {
-		config.Host = "localhost"
-	}
-
-	if config.User == "" || config.Password == "" || config.DBName == "" {
-		return nil, fmt.Errorf("database credentials (DB_USER, DB_PASS, DB_NAME) must be set in environment variables")
-	}
-
-	return config, nil
-}
-
-// NewMySQLClient creates a new MySQL client
-func NewMySQLClient(config *DBConfig) (*Client, error) {
+func getDBConnection(dbConfig *config.DBConfig) (*sql.DB, error) {
 	dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?parseTime=true",
-		config.User, config.Password, config.Host, config.Port, config.DBName)
+		dbConfig.User, dbConfig.Password, dbConfig.Host, dbConfig.Port, dbConfig.Name)
 
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open database: %v", err)
+		return nil, fmt.Errorf("failed to open database connection: %w", err)
 	}
 
 	if err := db.Ping(); err != nil {
-		return nil, fmt.Errorf("failed to ping database: %v", err)
+		return nil, fmt.Errorf("failed to ping database: %w", err)
+	}
+
+	fmt.Printf("Successfully connected to the database %s\n", dbConfig.Name)
+
+	return db, nil
+}
+
+// NewMySQLClient creates a new MySQL client
+func NewMySQLClient(config *config.Config) (*Client, error) {
+	dndTools, err := getDBConnection(config.DNDTools)
+	if err != nil {
+		return nil, err
+	}
+
+	srd, err := getDBConnection(config.SRD)
+	if err != nil {
+		return nil, err
 	}
 
 	return &Client{
-		config: config,
-		db:     db,
+		config:   config,
+		dndTools: dndTools,
+		srd:      srd,
 	}, nil
 }
 
 // Close closes the database connection
 func (c *Client) Close() error {
-	return c.db.Close()
-}
-
-// Query executes a query that returns rows
-func (c *Client) Query(query string, args ...interface{}) (*sql.Rows, error) {
-	return c.db.Query(query, args...)
-}
-
-// Execute runs a query that doesn't return rows
-func (c *Client) Execute(query string, args ...interface{}) (sql.Result, error) {
-	return c.db.Exec(query, args...)
+	err := c.dndTools.Close()
+	if err != nil {
+		return err
+	}
+	return c.srd.Close()
 }

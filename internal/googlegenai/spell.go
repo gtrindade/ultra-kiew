@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	// SpellLookupName is the name of the tool that sends a message with a file.
+	// SpellLookupName is the name of the tool that looks up spell descriptions.
 	SpellLookupToolName = "spell_lookup"
 )
 

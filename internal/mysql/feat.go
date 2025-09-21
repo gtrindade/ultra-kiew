@@ -27,7 +27,7 @@ type Feat struct {
 func (c *Client) GetFeatByName(name string) ([]*Feat, error) {
 	var feats []*Feat
 
-	rows, err := c.db.Query(`
+	rows, err := c.dndTools.Query(`
 		SELECT 
 			f.name,
 			f.description,

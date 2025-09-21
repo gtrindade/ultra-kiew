@@ -7,6 +7,8 @@ import (
 	"google.golang.org/genai"
 )
 
+const MaxFunctionResponseLength = 10000
+
 // SendMessageWithParts sends a message with multiple parts to the chat and returns the response text.
 func (c *Client) SendMessageWithParts(ctx context.Context, chatID int64, parts []*genai.Part) (string, error) {
 	var err error
@@ -64,6 +66,12 @@ func (c *Client) SendMessage(ctx context.Context, chatID int64, text string) (st
 				part := genai.NewPartFromText(fmt.Sprintf("Error executing function %s: %v", call.Name, err))
 				response = append(response, part)
 				continue
+			}
+
+			if len(functionResult) > MaxFunctionResponseLength {
+				fmt.Printf("Function result too long (%d characters), truncating\n", len(functionResult))
+				functionResult = functionResult[:MaxFunctionResponseLength] + "...(truncated)"
+				response = append(response, genai.NewPartFromText("Note: The function result was too long and has been truncated."))
 			}
 
 			part := genai.NewPartFromFunctionResponse(call.Name, map[string]any{

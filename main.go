@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 
+	"github.com/gtrindade/ultra-kiew/internal/config"
 	"github.com/gtrindade/ultra-kiew/internal/diceroller"
 	"github.com/gtrindade/ultra-kiew/internal/googlegenai"
 	"github.com/gtrindade/ultra-kiew/internal/mysql"
@@ -14,11 +15,12 @@ import (
 func main() {
 	ctx := context.Background()
 
-	dbConfig, err := mysql.GetDBConfigFromEnv()
+	config, err := config.LoadFromFile()
 	if err != nil {
-		log.Fatalf("Failed to get DB config from environment: %v", err)
+		log.Fatalf("Failed to load config: %v", err)
 	}
-	dbClient, err := mysql.NewMySQLClient(dbConfig)
+
+	dbClient, err := mysql.NewMySQLClient(config)
 	if err != nil {
 		log.Fatalf("Failed to create MySQL client: %v", err)
 	}
@@ -32,12 +34,12 @@ func main() {
 	}
 
 	storageClient := storage.NewClient()
-	aiClient, err := googlegenai.NewClient(ctx, toolConfigs, storageClient, dbClient)
+	aiClient, err := googlegenai.NewClient(ctx, toolConfigs, storageClient, dbClient, config)
 	if err != nil {
 		log.Fatalf("failed to create Google GenAI client: %v", err)
 	}
 
-	botClient, err := telegram.NewBot(aiClient)
+	botClient, err := telegram.NewBot(config, aiClient)
 	if err != nil {
 		log.Fatalf("failed to create Telegram bot: %v", err)
 	}

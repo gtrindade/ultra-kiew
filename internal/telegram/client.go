@@ -10,19 +10,17 @@ import (
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
+	"github.com/gtrindade/ultra-kiew/internal/config"
 	"github.com/gtrindade/ultra-kiew/internal/googlegenai"
 )
 
-const (
-	botUsername = "@ultrakiewbot"
-)
-
 type Client struct {
-	bot *bot.Bot
-	ai  *googlegenai.Client
+	bot     *bot.Bot
+	ai      *googlegenai.Client
+	botName string
 }
 
-func NewBot(ai *googlegenai.Client) (*Client, error) {
+func NewBot(config *config.Config, ai *googlegenai.Client) (*Client, error) {
 	c := &Client{
 		ai: ai,
 	}
@@ -31,17 +29,17 @@ func NewBot(ai *googlegenai.Client) (*Client, error) {
 		bot.WithCheckInitTimeout(time.Second * 30),
 	}
 
-	botToken := os.Getenv("TELEGRAM_BOT_TOKEN")
-	if botToken == "" {
-		return nil, fmt.Errorf("TELEGRAM_BOT_TOKEN environment variable is not set")
+	if config.TelegramBotToken == "" {
+		return nil, fmt.Errorf("missing telegram_bot_token in config.yaml")
 	}
 
-	b, err := bot.New(botToken, opts...)
+	b, err := bot.New(config.TelegramBotToken, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create bot: %w", err)
 	}
 
 	c.bot = b
+	c.botName = config.BotName
 	return c, nil
 }
 
@@ -63,24 +61,30 @@ func (c *Client) handler(ctx context.Context, b *bot.Bot, update *models.Update)
 	}
 
 	text := update.Message.Text
-	switch {
-	case strings.HasPrefix(text, botUsername) || update.Message.Chat.Type == models.ChatTypePrivate:
-		text = strings.TrimPrefix(text, botUsername)
-		response, err = c.ai.SendMessage(ctx, update.Message.Chat.ID, text)
-	default:
+	hasBotName := strings.Contains(text, c.botName)
+	isChatPrivate := update.Message.Chat.Type == models.ChatTypePrivate
+	isReplyToBot := update.Message.ReplyToMessage != nil && update.Message.ReplyToMessage.From != nil && update.Message.ReplyToMessage.From.Username == c.botName
+	if !isChatPrivate && !hasBotName && !isReplyToBot {
 		return
 	}
+	text = strings.TrimPrefix(text, c.botName)
+	response, err = c.ai.SendMessage(ctx, update.Message.Chat.ID, text)
 
 	if err != nil {
 		fmt.Printf("Failed to send message: %v", err)
-		return
+		response = "Sorry, something went wrong."
+	}
+
+	var replyParams *models.ReplyParameters
+	if !isChatPrivate {
+		replyParams = &models.ReplyParameters{
+			MessageID: update.Message.ID,
+		}
 	}
 
 	b.SendMessage(ctx, &bot.SendMessageParams{
-		ReplyParameters: &models.ReplyParameters{
-			MessageID: update.Message.ID,
-		},
-		ChatID: update.Message.Chat.ID,
-		Text:   response,
+		ReplyParameters: replyParams,
+		ChatID:          update.Message.Chat.ID,
+		Text:            response,
 	})
 }

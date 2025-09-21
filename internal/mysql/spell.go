@@ -50,7 +50,7 @@ type Spell struct {
 func (c *Client) GetSpellByName(name string) ([]*Spell, error) {
 	var spells []*Spell
 
-	rows, err := c.db.Query(`
+	rows, err := c.dndTools.Query(`
 		SELECT 
 				s.name,
 				sc.name as school,
