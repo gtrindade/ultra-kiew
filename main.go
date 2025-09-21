@@ -34,7 +34,7 @@ func main() {
 	}
 
 	storageClient := storage.NewClient()
-	aiClient, err := googlegenai.NewClient(ctx, toolConfigs, storageClient, dbClient)
+	aiClient, err := googlegenai.NewClient(ctx, toolConfigs, storageClient, dbClient, config)
 	if err != nil {
 		log.Fatalf("failed to create Google GenAI client: %v", err)
 	}

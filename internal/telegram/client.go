@@ -29,12 +29,11 @@ func NewBot(config *config.Config, ai *googlegenai.Client) (*Client, error) {
 		bot.WithCheckInitTimeout(time.Second * 30),
 	}
 
-	botToken := os.Getenv("TELEGRAM_BOT_TOKEN")
-	if botToken == "" {
-		return nil, fmt.Errorf("TELEGRAM_BOT_TOKEN environment variable is not set")
+	if config.TelegramBotToken == "" {
+		return nil, fmt.Errorf("missing telegram_bot_token in config.yaml")
 	}
 
-	b, err := bot.New(botToken, opts...)
+	b, err := bot.New(config.TelegramBotToken, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create bot: %w", err)
 	}

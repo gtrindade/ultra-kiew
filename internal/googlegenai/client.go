@@ -5,11 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"os"
 	"path"
 	"path/filepath"
 	"sync"
 
+	"github.com/gtrindade/ultra-kiew/internal/config"
 	"github.com/gtrindade/ultra-kiew/internal/mysql"
 	"github.com/gtrindade/ultra-kiew/internal/storage"
 	"google.golang.org/genai"
@@ -47,13 +47,12 @@ type Client struct {
 }
 
 // NewClient creates a new Google GenAI client with the provided API key and backend.
-func NewClient(ctx context.Context, toolConfigs map[string]*ToolConfig, storageClient *storage.Client, dbClient *mysql.Client) (*Client, error) {
-	apiKey := os.Getenv("GEMINI_API_KEY")
-	if apiKey == "" {
-		log.Fatal("GEMINI_API_KEY environment variable is not set")
+func NewClient(ctx context.Context, toolConfigs map[string]*ToolConfig, storageClient *storage.Client, dbClient *mysql.Client, config *config.Config) (*Client, error) {
+	if config.GeminiAPIKey == "" {
+		log.Fatal("Missing gemini_api_key in config.yaml")
 	}
 	client, err := genai.NewClient(ctx, &genai.ClientConfig{
-		APIKey:  apiKey,
+		APIKey:  config.GeminiAPIKey,
 		Backend: genai.BackendGeminiAPI,
 	})
 	if err != nil {
