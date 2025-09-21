@@ -122,6 +122,18 @@ func (c *Client) AddTools(toolConfigs map[string]*ToolConfig) error {
 		Function: c.EquipmentLookup,
 		Tool:     EquipmentLookupTool,
 	}
+	c.toolConfigs[ItemLookupToolName] = &ToolConfig{
+		Function: c.ItemLookup,
+		Tool:     ItemLookupTool,
+	}
+	c.toolConfigs[SkillLookupToolName] = &ToolConfig{
+		Function: c.SkillLookup,
+		Tool:     SkillLookupTool,
+	}
+	c.toolConfigs[MonsterLookupToolName] = &ToolConfig{
+		Function: c.MonsterLookup,
+		Tool:     MonsterLookupTool,
+	}
 	c.toolConfigs[ChatDataToolName] = &ToolConfig{
 		Function: c.ChatData,
 		Tool:     ChatDataTool,

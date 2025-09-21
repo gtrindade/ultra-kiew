@@ -62,24 +62,30 @@ func (c *Client) handler(ctx context.Context, b *bot.Bot, update *models.Update)
 	}
 
 	text := update.Message.Text
-	switch {
-	case strings.HasPrefix(text, c.botName) || update.Message.Chat.Type == models.ChatTypePrivate:
-		text = strings.TrimPrefix(text, c.botName)
-		response, err = c.ai.SendMessage(ctx, update.Message.Chat.ID, text)
-	default:
+	hasBotName := strings.Contains(text, c.botName)
+	isChatPrivate := update.Message.Chat.Type == models.ChatTypePrivate
+	isReplyToBot := update.Message.ReplyToMessage != nil && update.Message.ReplyToMessage.From != nil && update.Message.ReplyToMessage.From.Username == c.botName
+	if !isChatPrivate && !hasBotName && !isReplyToBot {
 		return
 	}
+	text = strings.TrimPrefix(text, c.botName)
+	response, err = c.ai.SendMessage(ctx, update.Message.Chat.ID, text)
 
 	if err != nil {
 		fmt.Printf("Failed to send message: %v", err)
-		return
+		response = "Sorry, something went wrong."
+	}
+
+	var replyParams *models.ReplyParameters
+	if !isChatPrivate {
+		replyParams = &models.ReplyParameters{
+			MessageID: update.Message.ID,
+		}
 	}
 
 	b.SendMessage(ctx, &bot.SendMessageParams{
-		ReplyParameters: &models.ReplyParameters{
-			MessageID: update.Message.ID,
-		},
-		ChatID: update.Message.Chat.ID,
-		Text:   response,
+		ReplyParameters: replyParams,
+		ChatID:          update.Message.Chat.ID,
+		Text:            response,
 	})
 }
