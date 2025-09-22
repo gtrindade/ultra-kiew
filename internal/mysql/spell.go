@@ -92,6 +92,8 @@ func (c *Client) GetSpellByName(name string) ([]*Spell, error) {
 				s.name LIKE ?
 		GROUP BY 
 				s.id, s.name, sc.name, sb.name, s.description, r.name
+		ORDER BY
+				s.name, r.name
 `, "%"+name+"%")
 	if err != nil {
 		return nil, fmt.Errorf("failed to query spells: %v", err)

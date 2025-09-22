@@ -57,10 +57,20 @@ func (c *Client) SpellLookup(args map[string]any) (string, error) {
 	}
 
 	results := ""
+	for _, spell := range spells {
+		if spell.Name == spellName {
+			results += formatSpellDescription(spell)
+		}
+	}
+
+	if results != "" {
+		return results, nil
+	}
+
 	if len(spells) > MaxSpellsToReturn {
 		results += "Too many spells found, here is a list of names:\n"
 		for _, spell := range spells {
-			results += fmt.Sprintf("- %s\n", spell.Name)
+			results += fmt.Sprintf("- %q from %s\n", spell.Name, spell.Source)
 		}
 		results += fmt.Sprintf("\nPlease be more specific, there are %d spells with similar names.\n\n", len(spells))
 		return results, nil
