@@ -11,6 +11,9 @@ import (
 const (
 	// SpellLookupName is the name of the tool that looks up spell descriptions.
 	SpellLookupToolName = "spell_lookup"
+
+	// MaxSpellsToReturn is the maximum number of spells to return in a single lookup.
+	MaxSpellsToReturn = 3
 )
 
 var (
@@ -54,6 +57,15 @@ func (c *Client) SpellLookup(args map[string]any) (string, error) {
 	}
 
 	results := ""
+	if len(spells) > MaxSpellsToReturn {
+		results += "Too many spells found, here is a list of names:\n"
+		for _, spell := range spells {
+			results += fmt.Sprintf("- %s\n", spell.Name)
+		}
+		results += fmt.Sprintf("\nPlease be more specific, there are %d spells with similar names.\n\n", len(spells))
+		return results, nil
+	}
+
 	for _, spell := range spells {
 		results += formatSpellDescription(spell)
 	}
@@ -78,8 +90,8 @@ func formatSpellDescription(spell *mysql.Spell) string {
 	desc.WriteString("\n")
 
 	// Level information
-	if spell.ClassLevels != "" {
-		desc.WriteString(fmt.Sprintf("Level: %s\n", spell.ClassLevels))
+	if spell.ClassLevels != nil && *spell.ClassLevels != "" {
+		desc.WriteString(fmt.Sprintf("Level: %s\n", *spell.ClassLevels))
 	}
 
 	// Components
@@ -116,7 +128,7 @@ func formatSpellDescription(spell *mysql.Spell) string {
 
 	// Source
 	if spell.Source != "" {
-		desc.WriteString(fmt.Sprintf("\n\nSource: %s", spell.Source))
+		desc.WriteString(fmt.Sprintf("\n\nSource: %s\n\n", spell.Source))
 	}
 
 	return desc.String()
