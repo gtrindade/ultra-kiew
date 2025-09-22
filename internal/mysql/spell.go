@@ -40,11 +40,11 @@ type Spell struct {
 	VerifiedTime         *time.Time `db:"verified_time"`
 
 	// Additional fields for joined data
-	Source      string `db:"source"`
-	School      string `db:"school"`
-	SubSchool   string `db:"sub_school"`
-	ClassLevels string `db:"class_levels"`
-	Components  string `db:"components"`
+	Source      string  `db:"source"`
+	School      string  `db:"school"`
+	SubSchool   string  `db:"sub_school"`
+	ClassLevels *string `db:"class_levels"`
+	Components  string  `db:"components"`
 }
 
 func (c *Client) GetSpellByName(name string) ([]*Spell, error) {
