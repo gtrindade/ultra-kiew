@@ -15,7 +15,7 @@ const (
 	FoundryVTTToolName = "foundry_vtt"
 
 	serviceFileName = "foundryvtt.service"
-	latestSymlink   = "FoundryVTT-latest"
+	symlink         = "FoundryVTT"
 )
 
 var (
@@ -85,11 +85,8 @@ func (c *Client) listFoundryVersions() (string, error) {
 	for _, entry := range entries {
 		if entry.IsDir() && strings.HasPrefix(entry.Name(), "FoundryVTT-") {
 			version := strings.TrimPrefix(entry.Name(), "FoundryVTT-")
-			if version == "latest" {
-				continue
-			}
 
-			symlinkPath := filepath.Join(c.config.FoundryVTT.Directory, latestSymlink)
+			symlinkPath := filepath.Join(c.config.FoundryVTT.Directory, symlink)
 			currentVersion, err := os.Readlink(symlinkPath)
 			if err == nil && currentVersion == entry.Name() {
 				version += " (current)"
@@ -111,7 +108,7 @@ func (c *Client) switchFoundryVersion(version string) (string, error) {
 	}
 
 	src := filepath.Join(c.config.FoundryVTT.Directory, "FoundryVTT-"+version)
-	dst := filepath.Join(c.config.FoundryVTT.Directory, latestSymlink)
+	dst := filepath.Join(c.config.FoundryVTT.Directory, symlink)
 	err := c.overrideSymlink(src, dst)
 	if err != nil {
 		return "", fmt.Errorf("failed to update symlink: %v", err)
