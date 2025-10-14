@@ -114,11 +114,11 @@ func (c *Client) switchFoundryVersion(version string) (string, error) {
 		return "", fmt.Errorf("failed to update symlink: %v", err)
 	}
 
-	if err := c.runSystemCommand("systemctl", "daemon-reload"); err != nil {
+	if err := c.runSystemCommand("sudo", "systemctl", "daemon-reload"); err != nil {
 		return "", fmt.Errorf("failed to reload systemd: %v", err)
 	}
 
-	if err := c.runSystemCommand("systemctl", "restart", "foundryvtt"); err != nil {
+	if err := c.runSystemCommand("sudo", "systemctl", "restart", "foundryvtt"); err != nil {
 		return "", fmt.Errorf("failed to restart foundryvtt service: %v", err)
 	}
 
