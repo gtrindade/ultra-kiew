@@ -35,7 +35,8 @@ type ToolConfig struct {
 
 type Client struct {
 	client      *genai.Client
-	config      *genai.GenerateContentConfig
+	aiConfig    *genai.GenerateContentConfig
+	config      *config.Config
 	dbClient    *mysql.Client
 	chats       map[int64]*genai.Chat
 	toolConfigs map[string]*ToolConfig
@@ -68,6 +69,7 @@ func NewClient(ctx context.Context, toolConfigs map[string]*ToolConfig, storageC
 		storage:     storageClient,
 		fileMap:     make(map[string]*genai.File),
 		chatData:    make(map[int64]map[string]string),
+		config:      config,
 	}
 
 	err = c.LoadDB(ctx)
@@ -137,6 +139,10 @@ func (c *Client) AddTools(toolConfigs map[string]*ToolConfig) error {
 		Function: c.ChatData,
 		Tool:     ChatDataTool,
 	}
+	c.toolConfigs[FoundryVTTToolName] = &ToolConfig{
+		Function: c.FoundryVTT,
+		Tool:     FoundryVTTTool,
+	}
 
 	tools := make([]*genai.Tool, 0, len(toolConfigs))
 	for name, toolConfig := range toolConfigs {
@@ -149,7 +155,7 @@ func (c *Client) AddTools(toolConfigs map[string]*ToolConfig) error {
 		tools = append(tools, toolConfig.Tool)
 	}
 
-	c.config = &genai.GenerateContentConfig{
+	c.aiConfig = &genai.GenerateContentConfig{
 		Tools: tools,
 	}
 
