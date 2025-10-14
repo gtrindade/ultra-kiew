@@ -7,7 +7,7 @@ import (
 )
 
 func (c *Client) NewChat(ctx context.Context, chatID int64) (*genai.Chat, error) {
-	chat, err := c.client.Chats.Create(ctx, Model, c.config, nil)
+	chat, err := c.client.Chats.Create(ctx, Model, c.aiConfig, nil)
 	if err != nil {
 		return nil, err
 	}

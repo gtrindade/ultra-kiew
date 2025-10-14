@@ -211,7 +211,6 @@ func (c *Client) ChatData(args map[string]any) (string, error) {
 		c.saveChatData(chatID, chatData)
 		return fmt.Sprintf("Set %s to %s", path, value), nil
 	case actionAdd:
-		// TODO: debug why the quantity is not adding up correctly. I already updated some hardcoded 1's to quantity
 		var msg string
 		if existingValue, exists := chatData[path]; exists {
 			var parsedValue []InventoryItem

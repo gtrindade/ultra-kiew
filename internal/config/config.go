@@ -6,6 +6,11 @@ import (
 	"gopkg.in/yaml.v2"
 )
 
+type FoundryConfig struct {
+	Directory   string `yaml:"directory"`
+	ServicePath string `yaml:"service_path"`
+}
+
 type DBConfig struct {
 	Host     string `yaml:"host"`
 	Port     string `yaml:"port"`
@@ -15,11 +20,12 @@ type DBConfig struct {
 }
 
 type Config struct {
-	TelegramBotToken string    `yaml:"telegram_bot_token"`
-	GeminiAPIKey     string    `yaml:"gemini_api_key"`
-	BotName          string    `yaml:"bot_name"`
-	DNDTools         *DBConfig `yaml:"dnd_tools"`
-	SRD              *DBConfig `yaml:"srd"`
+	TelegramBotToken string         `yaml:"telegram_bot_token"`
+	GeminiAPIKey     string         `yaml:"gemini_api_key"`
+	BotName          string         `yaml:"bot_name"`
+	DNDTools         *DBConfig      `yaml:"dnd_tools"`
+	SRD              *DBConfig      `yaml:"srd"`
+	FoundryVTT       *FoundryConfig `yaml:"foundry_vtt"`
 }
 
 const (
