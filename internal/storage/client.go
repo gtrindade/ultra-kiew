@@ -17,6 +17,9 @@ const (
 
 	// DBPath is the path where database files are stored.
 	DBPath = "db"
+
+	// ChatHistoryFileName is the filename for chat history.
+	ChatHistoryFileName = "chat_history.json"
 )
 
 // Client provides a simple file-based storage system.
@@ -50,7 +53,6 @@ func (s *Client) Save(name string, data any) error {
 
 	return nil
 }
-
 func (s *Client) SaveAsync(name string, data any) {
 	go func() {
 		if err := s.Save(name, data); err != nil {
@@ -80,15 +82,28 @@ func (s *Client) Load(name string, data any) error {
 		return fmt.Errorf("failed to decode JSON data: %w", err)
 	}
 
+	fmt.Printf("Data loaded from file %s successfully\n", filePath)
 	return nil
 }
 
+// LoadFromDB loads data from a file in the predefined database path.
 func (c *Client) LoadFromDB(name string, data any) error {
 	return c.Load(filepath.Join(DBPath, name), data)
 }
 
+// SaveToDBAsync saves data to a file in the predefined database path asynchronously.
 func (c *Client) SaveToDBAsync(name string, data any) {
 	c.SaveAsync(filepath.Join(DBPath, name), data)
+}
+
+// SaveChatHistoryAsync saves chat history to the predefined chat history file asynchronously.
+func (c *Client) SaveChatHistoryAsync(data any) {
+	c.SaveToDBAsync(ChatHistoryFileName, data)
+}
+
+// LoadChatHistory loads chat history from the predefined chat history file.
+func (c *Client) LoadChatHistory(data any) error {
+	return c.LoadFromDB(ChatHistoryFileName, data)
 }
 
 // Delete removes the file with the specified name.
