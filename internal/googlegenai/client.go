@@ -72,7 +72,7 @@ func NewClient(ctx context.Context, toolConfigs map[string]*ToolConfig, storageC
 		config:      config,
 	}
 
-	err = c.LoadDB(ctx)
+	err = c.storage.LoadFromDB(filesFileName, &c.fileMap)
 	if err != nil {
 		return nil, err
 	}
@@ -90,20 +90,6 @@ func NewClient(ctx context.Context, toolConfigs map[string]*ToolConfig, storageC
 	}
 
 	return c, nil
-}
-
-func (c *Client) LoadDB(ctx context.Context) error {
-	if c.storage == nil {
-		return errors.New("storage client is not initialized")
-	}
-
-	err := c.storage.LoadFromDB(filesFileName, &c.fileMap)
-	if err != nil {
-		return fmt.Errorf("failed to load database: %w", err)
-	}
-
-	fmt.Println("File database loaded successfully")
-	return nil
 }
 
 func (c *Client) AddTools(toolConfigs map[string]*ToolConfig) error {
@@ -157,6 +143,13 @@ func (c *Client) AddTools(toolConfigs map[string]*ToolConfig) error {
 
 	c.aiConfig = &genai.GenerateContentConfig{
 		Tools: tools,
+		SystemInstruction: &genai.Content{
+			Parts: []*genai.Part{
+				genai.NewPartFromText(fmt.Sprintf(`You are a helpful assistant named %q in a group chat. You will receive multiple messages in the format [Timestamp - Username]: `+"`message`"+` that provide conversation context. Your messages do not need to use same format with timestamp and username.
+
+The last message in the conversation is the one you should directly respond to - it's either mentioning you or replying to something you said. Use all previous messages as context to inform your response, but only reply to the last message. Keep your responses conversational, natural, and concise as if you're part of the group.`, c.config.BotName)),
+			},
+		},
 	}
 
 	return nil

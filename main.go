@@ -39,7 +39,7 @@ func main() {
 		log.Fatalf("failed to create Google GenAI client: %v", err)
 	}
 
-	botClient, err := telegram.NewBot(config, aiClient)
+	botClient, err := telegram.NewBot(config, aiClient, storageClient)
 	if err != nil {
 		log.Fatalf("failed to create Telegram bot: %v", err)
 	}
