@@ -17,7 +17,7 @@ import (
 
 const (
 	// Model is the default model used for generating content.
-	Model = "gemini-2.0-flash"
+	Model = "gemini-2.5-flash-lite"
 
 	// UPLOAD_ENABLED indicates whether file upload is enabled.
 	UPLOAD_ENABLED = false
@@ -145,9 +145,9 @@ func (c *Client) AddTools(toolConfigs map[string]*ToolConfig) error {
 		Tools: tools,
 		SystemInstruction: &genai.Content{
 			Parts: []*genai.Part{
-				genai.NewPartFromText(fmt.Sprintf(`You are a helpful assistant named %q in a group chat. You will receive multiple messages in the format [Timestamp - Username]: `+"`message`"+` that provide conversation context. Your messages do not need to use same format with timestamp and username.
+				genai.NewPartFromText(fmt.Sprintf(`You are a helpful assistant named %q in a group chat. You will receive multiple messages in the format [Timestamp - Username]: `+"`message`"+` that provide conversation context. Your messages do not need to use same format with timestamp and username and quoted, your responses will be sent via telegram API and the time and name of your messages will be added automatically.
 
-The last message in the conversation is the one you should directly respond to - it's either mentioning you or replying to something you said. Use all previous messages as context to inform your response, but only reply to the last message. Keep your responses conversational, natural, and concise as if you're part of the group.`, c.config.BotName)),
+The last message in the conversation is the one you should directly respond to - it's either mentioning you or replying to something you said. Use all previous messages as context to inform your response, but only reply to the last message. Keep your responses conversational, natural, and concise as if you're part of the group. That includes chosing the same language used in the chat when responding.`, c.config.BotName)),
 			},
 		},
 	}
