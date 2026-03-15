@@ -4,13 +4,6 @@ Telegram bot using AI to do silly things.
 
 ## How to run it
 
-### Environment Variables
-Create a .env file in the root directory of the project with the following content:
-```bash
-export TELEGRAM_BOT_TOKEN=<your-telegram-bot-token>
-export GEMINI_API_KEY=<your-gemini-api-key>
-```
-
 ### Database
 Make sure you have MySQL installed and running. Then, execute the following commands to set up the database:
 ```bash
@@ -40,7 +33,10 @@ mysql -u srd -pstrong_password_here srd < data/srd-db-v1.3.sql
 Create a config.yaml file like this:
 
 ```yaml
-dndTools:
+telegram_bot_token: "<your-telegram-token>"
+gemini_api_key: "<your-gemini-key>"
+bot_name: "ultra-kiew"
+dnd_tools:
   host: "localhost"
   port: 3306
   user: dndtools
@@ -57,5 +53,5 @@ srd:
 ### Start the bot
 Run the following command to start the bot:
 ```bash
-source .env && go run main.go
+go run main.go
 ```

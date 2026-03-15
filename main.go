@@ -7,6 +7,7 @@ import (
 	"github.com/gtrindade/ultra-kiew/internal/config"
 	"github.com/gtrindade/ultra-kiew/internal/diceroller"
 	"github.com/gtrindade/ultra-kiew/internal/googlegenai"
+	"github.com/gtrindade/ultra-kiew/internal/group"
 	"github.com/gtrindade/ultra-kiew/internal/mysql"
 	"github.com/gtrindade/ultra-kiew/internal/storage"
 	"github.com/gtrindade/ultra-kiew/internal/telegram"
@@ -26,14 +27,20 @@ func main() {
 	}
 	defer dbClient.Close()
 
+	storageClient := storage.NewClient()
+	groupManager := group.NewManager(storageClient)
+
 	toolConfigs := map[string]*googlegenai.ToolConfig{
 		diceroller.RollDice: {
 			Function: diceroller.RollWithArgs,
 			Tool:     diceroller.GetToolConfig(),
 		},
+		group.GroupManageToolName: {
+			Function: groupManager.Manage,
+			Tool:     group.GetToolConfig(),
+		},
 	}
 
-	storageClient := storage.NewClient()
 	aiClient, err := googlegenai.NewClient(ctx, toolConfigs, storageClient, dbClient, config)
 	if err != nil {
 		log.Fatalf("failed to create Google GenAI client: %v", err)
