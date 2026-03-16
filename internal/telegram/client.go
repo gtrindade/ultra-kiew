@@ -100,7 +100,9 @@ func (c *Client) handler(ctx context.Context, b *bot.Bot, update *models.Update)
 	}
 	text = c.getChatHistory(chatID) + "\n" + getMessageFromUpdate(update).String()
 	c.clearChatHistory(chatID)
-	response, err = c.ai.SendMessage(ctx, chatID, text)
+	
+	chatTitle := update.Message.Chat.Title
+	response, err = c.ai.SendMessage(ctx, chatID, chatTitle, text)
 
 	if err != nil {
 		fmt.Printf("Failed to send message: %v", err)

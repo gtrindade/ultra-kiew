@@ -12,6 +12,10 @@ const (
 	groupsFileName      = "groups.json"
 )
 
+type Group struct {
+	Users []string `json:"users"`
+}
+
 type Manager struct {
 	storage *storage.Client
 }
@@ -34,7 +38,7 @@ func (m *Manager) Manage(args map[string]any) (string, error) {
 		return "", fmt.Errorf("invalid argument: action is required")
 	}
 
-	groups := make(map[string][]string)
+	groups := make(map[string]Group)
 	// Try to load existing groups file
 	m.storage.LoadFromDB(groupsFileName, &groups)
 
@@ -54,7 +58,10 @@ func (m *Manager) Manage(args map[string]any) (string, error) {
 			}
 		}
 
-		groups[chatIDStr] = users
+		group := groups[chatIDStr]
+		group.Users = users
+		groups[chatIDStr] = group
+
 		m.storage.SaveToDBAsync(groupsFileName, groups)
 		return fmt.Sprintf("Successfully created group for chat %d with users: %v", chatID, users), nil
 
@@ -67,11 +74,11 @@ func (m *Manager) Manage(args map[string]any) (string, error) {
 		return fmt.Sprintf("Successfully removed group for chat %d", chatID), nil
 
 	case "list":
-		users, exists := groups[chatIDStr]
-		if !exists || len(users) == 0 {
+		group, exists := groups[chatIDStr]
+		if !exists || len(group.Users) == 0 {
 			return fmt.Sprintf("No group exists for chat %d", chatID), nil
 		}
-		return fmt.Sprintf("Group for chat %d has users: %v", chatID, users), nil
+		return fmt.Sprintf("Group for chat %d has users: %v", chatID, group.Users), nil
 
 	default:
 		return "", fmt.Errorf("invalid action: %s, must be one of [create, remove, list]", action)
@@ -83,7 +90,7 @@ func GetToolConfig() *genai.Tool {
 		FunctionDeclarations: []*genai.FunctionDeclaration{
 			{
 				Name:        GroupManageToolName,
-				Description: "Manages a group of users for the current chat. Can create a group with a list of users, remove the group, or list the users in the group. Don't ever need to send the chat ID back to the user.",
+				Description: "Manages a group of users for the current chat. Can create a group with a list of users, remove the group, or list the users. Don't ever need to send the chat ID back to the user. ALWAYS enforce a strict limit of 1 group per chat. If the user tries to create another group when one already exists, refuse the request and list the existing group instead.",
 				Parameters: &genai.Schema{
 					Type: "object",
 					Properties: map[string]*genai.Schema{

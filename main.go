@@ -6,6 +6,7 @@ import (
 
 	"github.com/gtrindade/ultra-kiew/internal/config"
 	"github.com/gtrindade/ultra-kiew/internal/diceroller"
+	"github.com/gtrindade/ultra-kiew/internal/event"
 	"github.com/gtrindade/ultra-kiew/internal/googlegenai"
 	"github.com/gtrindade/ultra-kiew/internal/group"
 	"github.com/gtrindade/ultra-kiew/internal/mysql"
@@ -29,6 +30,7 @@ func main() {
 
 	storageClient := storage.NewClient()
 	groupManager := group.NewManager(storageClient)
+	eventManager := event.NewManager(storageClient)
 
 	toolConfigs := map[string]*googlegenai.ToolConfig{
 		diceroller.RollDice: {
@@ -38,6 +40,10 @@ func main() {
 		group.GroupManageToolName: {
 			Function: groupManager.Manage,
 			Tool:     group.GetToolConfig(),
+		},
+		event.EventManageToolName: {
+			Function: eventManager.Manage,
+			Tool:     event.GetToolConfig(),
 		},
 	}
 

@@ -28,7 +28,7 @@ func (c *Client) SendMessageWithParts(ctx context.Context, chatID int64, parts [
 }
 
 // SendMessage sends a text message to the chat and handles any function calls that may be triggered.
-func (c *Client) SendMessage(ctx context.Context, chatID int64, text string) (string, error) {
+func (c *Client) SendMessage(ctx context.Context, chatID int64, chatTitle string, text string) (string, error) {
 	var err error
 	chat, exists := c.chats[chatID]
 	if !exists {
@@ -43,7 +43,7 @@ func (c *Client) SendMessage(ctx context.Context, chatID int64, text string) (st
 		return "", err
 	}
 
-	msg := fmt.Sprintf("%s. The chatID is %d", text, chatID)
+	msg := fmt.Sprintf("%s. The chatID is %d. The chat title is %q", text, chatID, chatTitle)
 	parts := []*genai.Part{genai.NewPartFromText(msg)}
 	result, err := chat.Send(ctx, parts...)
 	if err != nil {
@@ -60,6 +60,11 @@ func (c *Client) SendMessage(ctx context.Context, chatID int64, text string) (st
 				response = append(response, part)
 				continue
 			}
+
+			if call.Args == nil {
+				call.Args = make(map[string]any)
+			}
+			call.Args["_chatTitle"] = chatTitle
 
 			functionResult, err := toolConfig.Function(call.Args)
 			if err != nil {
