@@ -10,6 +10,7 @@ import (
 const (
 	GroupManageToolName = "group_manage"
 	groupsFileName      = "groups.json"
+	usersFileName       = "users.json"
 )
 
 type Group struct {
@@ -63,12 +64,33 @@ func (m *Manager) Manage(args map[string]any) (string, error) {
 		groups[chatIDStr] = group
 
 		m.storage.SaveToDBAsync(groupsFileName, groups)
+
+		var missingUsers []string
+		knownUsers := make(map[string]int64)
+		// We only need to check this internally. If it fails, we just assume tracking isn't populated.
+		m.storage.LoadFromDB(usersFileName, &knownUsers)
+		for _, u := range users {
+			if _, exists := knownUsers[u]; !exists {
+				missingUsers = append(missingUsers, u)
+			}
+		}
+
+		if len(missingUsers) > 0 {
+			return fmt.Sprintf("Successfully created group for chat %d with users: %v.\n\nHowever, the following users have not started the bot yet: %v. Please make sure to ask them to direct message the bot to start it, so it can mention them later. If they already started the bot, tell them to stop and start again.", chatID, users, missingUsers), nil
+		}
 		return fmt.Sprintf("Successfully created group for chat %d with users: %v", chatID, users), nil
 
 	case "remove":
 		if _, exists := groups[chatIDStr]; !exists {
 			return fmt.Sprintf("No group exists for chat %d", chatID), nil
 		}
+		
+		events := make(map[string]any)
+		m.storage.LoadFromDB("events.json", &events)
+		if _, hasEvent := events[chatIDStr]; hasEvent {
+			return fmt.Sprintf("Cannot remove group for chat %d because there is an active event associated with it. Please remove the event first.", chatID), nil
+		}
+
 		delete(groups, chatIDStr)
 		m.storage.SaveToDBAsync(groupsFileName, groups)
 		return fmt.Sprintf("Successfully removed group for chat %d", chatID), nil

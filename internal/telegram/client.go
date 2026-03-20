@@ -25,6 +25,8 @@ type Client struct {
 	lock           sync.RWMutex
 	chatHistory    map[int64][]*SavedMessage
 	maxHistorySize int
+	users          map[string]int64
+	usersLock      sync.RWMutex
 }
 
 // SavedMessage represents a message saved from a user.
@@ -46,6 +48,7 @@ func NewBot(config *config.Config, ai *googlegenai.Client, storageClient *storag
 		ai:             ai,
 		chatHistory:    make(map[int64][]*SavedMessage),
 		maxHistorySize: 600,
+		users:          make(map[string]int64),
 	}
 	opts := []bot.Option{
 		bot.WithDefaultHandler(c.handler),
@@ -69,6 +72,8 @@ func NewBot(config *config.Config, ai *googlegenai.Client, storageClient *storag
 		return nil, fmt.Errorf("failed to load chat history: %w", err)
 	}
 
+	c.storage.LoadFromDB("users.json", &c.users)
+
 	return c, nil
 }
 
@@ -85,9 +90,11 @@ func (c *Client) handler(ctx context.Context, b *bot.Bot, update *models.Update)
 	var response string
 	var err error
 
-	if update == nil || update.Message == nil {
+	if update == nil || update.Message == nil || update.Message.From == nil {
 		return
 	}
+
+	c.trackUser(update.Message.From)
 
 	chatID := update.Message.Chat.ID
 	text := update.Message.Text
@@ -171,4 +178,29 @@ func (c *Client) getCopyOfChatHistory() map[int64][]*SavedMessage {
 		copy(history[chatID], messages)
 	}
 	return history
+}
+
+func (c *Client) trackUser(from *models.User) {
+	if from.Username == "" {
+		return
+	}
+
+	username := "@" + from.Username
+
+	c.usersLock.RLock()
+	_, known := c.users[username]
+	c.usersLock.RUnlock()
+
+	if !known {
+		c.usersLock.Lock()
+		c.users[username] = from.ID
+		// Copy users to avoid concurrent map read/write during JSON encoding.
+		usersCopy := make(map[string]int64, len(c.users))
+		for k, v := range c.users {
+			usersCopy[k] = v
+		}
+		c.usersLock.Unlock()
+
+		c.storage.SaveToDBAsync("users.json", usersCopy)
+	}
 }
