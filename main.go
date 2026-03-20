@@ -57,5 +57,7 @@ func main() {
 		log.Fatalf("failed to create Telegram bot: %v", err)
 	}
 
+	eventManager.SetBot(botClient.Bot())
+
 	botClient.Start(ctx)
 }

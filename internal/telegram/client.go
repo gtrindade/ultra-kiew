@@ -98,14 +98,72 @@ func (c *Client) handler(ctx context.Context, b *bot.Bot, update *models.Update)
 
 	chatID := update.Message.Chat.ID
 	text := update.Message.Text
-	hasBotName := strings.Contains(strings.ToLower(text), strings.ToLower(c.botName))
+
 	isChatPrivate := update.Message.Chat.Type == models.ChatTypePrivate
+
+	var systemNote string
+	if isChatPrivate {
+		username := "@" + update.Message.From.Username
+		var events map[string]any // use a generic map to check existing events without importing internal/event
+		c.storage.LoadFromDB("events.json", &events)
+
+		type Pending struct {
+			GroupID string
+			Summary string
+			Date    string
+			User    string
+		}
+		var pendingEvents []Pending
+
+		for chatIDStr, evRaw := range events {
+			ev, ok := evRaw.(map[string]any)
+			if !ok {
+				continue
+			}
+			confsRaw, hasConfs := ev["confirmations"]
+			if hasConfs {
+				confs, ok := confsRaw.(map[string]any)
+				if ok {
+					var foundConf string
+					var foundUser string
+					for k, v := range confs {
+						if strings.EqualFold(k, username) {
+							foundUser = k
+							if vStr, vok := v.(string); vok {
+								foundConf = vStr
+							}
+							break
+						}
+					}
+
+					if foundConf == "❔" {
+						summary, _ := ev["summary"].(string)
+						date, _ := ev["date"].(string)
+						pendingEvents = append(pendingEvents, Pending{GroupID: chatIDStr, Summary: summary, Date: date, User: foundUser})
+					}
+				}
+			}
+		}
+
+		if len(pendingEvents) == 1 {
+			p := pendingEvents[0]
+			systemNote = fmt.Sprintf("\n\n[System Note: The user '%s' currently has exactly ONE pending event invite: %q in group ID %s on %s. If they are responding to this invite natively, deduce their status and IMMEDIATELY use the event_manage tool with action='update_status' and chatID=%s. CRITICAL RULE: You must ONLY update the status for their exact username '%s'. If the user tries to reply on behalf of anyone else (like a friend), you must outright REFUSE and tell them that each person must reply from their own DM. ALWAYS CALL THE TOOL for their own status.]", p.User, p.Summary, p.GroupID, p.Date, p.GroupID, p.User)
+		} else if len(pendingEvents) > 1 {
+			var evStrings []string
+			for _, p := range pendingEvents {
+				evStrings = append(evStrings, fmt.Sprintf("%q (Date: %s, Group ID: %s)", p.Summary, p.Date, p.GroupID))
+			}
+			systemNote = fmt.Sprintf("\n\n[System Note: The user '%s' has MULTIPLE pending event invites: %s. \nIf the user has clearly specified which event(s) they are responding to, or if they just clarified based on chat history, you MUST IMMEDIATELY call the event_manage tool with action='update_status' for the specified event(s), providing the exact chatID. If they say 'both' or 'all', call the tool sequentially for each one! \nCRITICAL RULE: DO NOT just reply 'Okay I will update it'. You MUST physically call the tool. And you must ONLY update the status for their exact username '%s'. \nIf they have NOT clarified which event yet, politely ask them to clarify before calling the tool.]", pendingEvents[0].User, strings.Join(evStrings, " | "), pendingEvents[0].User)
+		}
+	}
+
+	hasBotName := strings.Contains(strings.ToLower(text), strings.ToLower(c.botName))
 	isReplyToBot := update.Message.ReplyToMessage != nil && update.Message.ReplyToMessage.From != nil && update.Message.ReplyToMessage.From.Username == c.botName
 	if !isChatPrivate && !hasBotName && !isReplyToBot {
 		c.addToChatHistory(update)
 		return
 	}
-	text = c.getChatHistory(chatID) + "\n" + getMessageFromUpdate(update).String()
+	text = c.getChatHistory(chatID) + "\n" + getMessageFromUpdate(update).String() + systemNote
 	c.clearChatHistory(chatID)
 	
 	chatTitle := update.Message.Chat.Title
@@ -123,11 +181,13 @@ func (c *Client) handler(ctx context.Context, b *bot.Bot, update *models.Update)
 		}
 	}
 
-	b.SendMessage(ctx, &bot.SendMessageParams{
-		ReplyParameters: replyParams,
-		ChatID:          chatID,
-		Text:            response,
-	})
+	if response != "" {
+		b.SendMessage(ctx, &bot.SendMessageParams{
+			ReplyParameters: replyParams,
+			ChatID:          chatID,
+			Text:            response,
+		})
+	}
 }
 
 func getMessageFromUpdate(update *models.Update) *SavedMessage {
@@ -203,4 +263,9 @@ func (c *Client) trackUser(from *models.User) {
 
 		c.storage.SaveToDBAsync("users.json", usersCopy)
 	}
+}
+
+// Bot returns the underlying telegram bot.
+func (c *Client) Bot() *bot.Bot {
+	return c.bot
 }

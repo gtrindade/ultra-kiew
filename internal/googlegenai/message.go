@@ -3,6 +3,7 @@ package googlegenai
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"google.golang.org/genai"
 )
@@ -65,6 +66,7 @@ func (c *Client) SendMessage(ctx context.Context, chatID int64, chatTitle string
 				call.Args = make(map[string]any)
 			}
 			call.Args["_chatTitle"] = chatTitle
+			call.Args["_callerChatID"] = chatID
 
 			functionResult, err := toolConfig.Function(call.Args)
 			if err != nil {
@@ -97,12 +99,17 @@ func (c *Client) SendMessage(ctx context.Context, chatID int64, chatTitle string
 	}
 
 	responseText := result.Text()
+	
+	if strings.Contains(responseText, "__SILENT__") {
+		return "", nil
+	}
+
 	if responseText == "" {
 		err = c.checkChatHistory(chatID)
 		if err != nil {
 			return err.Error(), nil
 		}
-		return "I apologize, but I couldn't generate a response. Please try again.", nil
+		return "", nil
 	}
 
 	return responseText, nil

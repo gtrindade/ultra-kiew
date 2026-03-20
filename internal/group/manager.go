@@ -45,6 +45,15 @@ func (m *Manager) Manage(args map[string]any) (string, error) {
 
 	chatIDStr := fmt.Sprintf("%d", chatID)
 
+	callerChatID, ok := args["_callerChatID"].(int64)
+	if !ok {
+		callerChatID = 0
+	}
+
+	if (action == "create" || action == "remove") && chatID != callerChatID {
+		return "", fmt.Errorf("security policy violation: you can only use '%s' for groups directly from within the group chat they belong to. Please refuse the request and instruct the user to go to the group chat to perform this operation.", action)
+	}
+
 	switch action {
 	case "create":
 		usersRaw, ok := args["users"].([]any)
@@ -53,9 +62,13 @@ func (m *Manager) Manage(args map[string]any) (string, error) {
 		}
 		
 		var users []string
+		seen := make(map[string]bool)
 		for _, u := range usersRaw {
 			if str, ok := u.(string); ok {
-				users = append(users, str)
+				if !seen[str] {
+					seen[str] = true
+					users = append(users, str)
+				}
 			}
 		}
 
@@ -112,7 +125,7 @@ func GetToolConfig() *genai.Tool {
 		FunctionDeclarations: []*genai.FunctionDeclaration{
 			{
 				Name:        GroupManageToolName,
-				Description: "Manages a group of users for the current chat. Can create a group with a list of users, remove the group, or list the users. Don't ever need to send the chat ID back to the user. ALWAYS enforce a strict limit of 1 group per chat. If the user tries to create another group when one already exists, refuse the request and list the existing group instead.",
+				Description: "Manages a group of users for the current chat. Can create a group with a list of users, remove the group, or list the users. Don't ever need to send the chat ID back to the user. ALWAYS enforce a strict limit of 1 group per chat. If the user tries to create another group when one already exists, refuse the request and list the existing group instead. If the user provides duplicate usernames, DO NOT reject the request; just deduplicate them and create the group anyway.",
 				Parameters: &genai.Schema{
 					Type: "object",
 					Properties: map[string]*genai.Schema{
