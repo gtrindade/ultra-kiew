@@ -8,7 +8,7 @@ import (
 	"sync"
 )
 
-const (
+var (
 	// BasePath is the default base path for storage.
 	BasePath = "data"
 

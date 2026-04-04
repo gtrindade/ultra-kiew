@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log"
+	"time"
 
 	"github.com/gtrindade/ultra-kiew/internal/config"
 	"github.com/gtrindade/ultra-kiew/internal/diceroller"
@@ -58,6 +59,9 @@ func main() {
 	}
 
 	eventManager.SetBot(botClient.Bot())
+	eventManager.SetAI(aiClient)
+
+	go eventManager.StartEventMonitor(ctx, 1*time.Minute)
 
 	botClient.Start(ctx)
 }

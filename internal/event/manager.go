@@ -3,9 +3,13 @@ package event
 import (
 	"context"
 	"fmt"
+	"log"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-telegram/bot"
+	"github.com/gtrindade/ultra-kiew/internal/googlegenai"
 	"github.com/gtrindade/ultra-kiew/internal/storage"
 	"google.golang.org/genai"
 )
@@ -17,9 +21,13 @@ const (
 
 type Event struct {
 	Date          string            `json:"date"`
+	Timestamp     int64             `json:"timestamp,omitempty"`
 	Summary       string            `json:"summary"`
-	MessageID     int               `json:"messageID"`
-	Confirmations map[string]string `json:"confirmations"`
+	MessageID          int               `json:"messageID"`
+	Confirmations      map[string]string `json:"confirmations"`
+	Reminder12HourSent bool              `json:"reminder_12h_sent,omitempty"`
+	Reminder1HourSent  bool              `json:"reminder_1h_sent,omitempty"`
+	ReminderNowSent    bool              `json:"reminder_now_sent,omitempty"`
 }
 
 type Group struct {
@@ -29,10 +37,15 @@ type Group struct {
 type Manager struct {
 	storage *storage.Client
 	bot     *bot.Bot
+	ai      *googlegenai.Client
 }
 
 func (m *Manager) SetBot(b *bot.Bot) {
 	m.bot = b
+}
+
+func (m *Manager) SetAI(ai *googlegenai.Client) {
+	m.ai = ai
 }
 
 func NewManager(storageClient *storage.Client) *Manager {
@@ -57,7 +70,7 @@ func (m *Manager) Manage(args map[string]any) (string, error) {
 	m.storage.LoadFromDB(eventsFileName, &events)
 
 	chatIDStr := fmt.Sprintf("%d", chatID)
-	
+
 	callerChatID, ok := args["_callerChatID"].(int64)
 	if !ok {
 		callerChatID = 0
@@ -85,6 +98,21 @@ func (m *Manager) Manage(args map[string]any) (string, error) {
 			return "", fmt.Errorf("date is required to create an event. If the user didn't specify one, do not try to guess. Just respond to the user naturally and ask them when they'd like to schedule the event.")
 		}
 
+		isoDate, ok := args["iso_date"].(string)
+		if !ok || isoDate == "" {
+			return "", fmt.Errorf("iso_date is required to create an event and must be in ISO 8601 format")
+		}
+		
+		t, err := time.Parse(time.RFC3339, isoDate)
+		if err != nil {
+			return "", fmt.Errorf("invalid iso_date format. Must be ISO 8601 with timezone (e.g., '2026-04-03T21:00:00-03:00'). Error: %v", err)
+		}
+		timestamp := t.Unix()
+
+		if timestamp <= time.Now().Unix() {
+			return "", fmt.Errorf("FAILED! The requested event time evaluates to a time in the past! THE EVENT WAS NOT CREATED! The user scheduled the event for %s which has already happened. You MUST explain that it has already passed.", isoDate)
+		}
+
 		summary, ok := args["_chatTitle"].(string)
 		if !ok || summary == "" {
 			return "", fmt.Errorf("internal error: _chatTitle context is missing")
@@ -93,7 +121,7 @@ func (m *Manager) Manage(args map[string]any) (string, error) {
 		var missingUsers []string
 		knownUsers := make(map[string]int64)
 		m.storage.LoadFromDB("users.json", &knownUsers)
-		
+
 		confirmations := make(map[string]string)
 		eventText := fmt.Sprintf("%s - %s\n\n", summary, date)
 		for _, u := range groups[chatIDStr].Users {
@@ -115,7 +143,7 @@ func (m *Manager) Manage(args map[string]any) (string, error) {
 				if uid, exists := knownUsers[u]; exists {
 					_, err := m.bot.SendMessage(context.Background(), &bot.SendMessageParams{
 						ChatID: uid,
-						Text:   fmt.Sprintf("You have been invited to %q on %s in the group. Can you show up? (Reply to me here!)", summary, date),
+						Text:   fmt.Sprintf("%q %s. Rola? se for atrasar, me dê uma estimativa", summary, date),
 					})
 					if err != nil {
 						missingUsers = append(missingUsers, u)
@@ -128,6 +156,7 @@ func (m *Manager) Manage(args map[string]any) (string, error) {
 
 		event := Event{
 			Date:          date,
+			Timestamp:     timestamp,
 			Summary:       summary,
 			MessageID:     messageID,
 			Confirmations: confirmations,
@@ -138,7 +167,7 @@ func (m *Manager) Manage(args map[string]any) (string, error) {
 		if len(missingUsers) > 0 && m.bot != nil {
 			m.bot.SendMessage(context.Background(), &bot.SendMessageParams{
 				ChatID: chatID,
-				Text:   fmt.Sprintf("Warning: Could not send a direct message to the following users because they haven't started this bot yet: %v. Please ask them to DM me and start the bot!", missingUsers),
+				Text:   fmt.Sprintf("Aviso: Não foi possível enviar uma mensagem direta para os seguintes usuários porque eles ainda não iniciaram este bot: %v. Por favor, peça a eles para me enviarem uma DM para iniciar o bot!", missingUsers),
 			})
 		}
 		return fmt.Sprintf("Successfully created event for chat %d on %s with summary %q. EVENT SUMMARY ALREADY SENT TO CHAT. DO NOT EXPLAIN OR ADD EMOJIS. YOUR ONLY JOB NOW IS TO OUTPUT EXACTLY '__SILENT__' SO NO SPAM IS SENT.", chatID, date, summary), nil
@@ -147,8 +176,11 @@ func (m *Manager) Manage(args map[string]any) (string, error) {
 		if _, exists := events[chatIDStr]; !exists {
 			return fmt.Sprintf("No event exists for chat %d", chatID), nil
 		}
+		
+		summary := events[chatIDStr].Summary
 		delete(events, chatIDStr)
 		m.storage.SaveToDBAsync(eventsFileName, events)
+		log.Printf("Alert: Event '%s' has been manually removed for chat %d", summary, chatID)
 		return fmt.Sprintf("Successfully removed event for chat %d", chatID), nil
 
 	case "get":
@@ -237,16 +269,31 @@ func (m *Manager) Manage(args map[string]any) (string, error) {
 					}
 				}
 
-				var finalMessage string
+				var finalMessagePrompt string
 				if allYes {
-					finalMessage = "All confirmed! Get ready for an epic and cheesy RPG session full of critical hits and critical failures! 🎲🐉"
+					finalMessagePrompt = "Gere uma mensagem animada e nerd, em português do Brasil (pt-br), informando o grupo que TODO MUNDO CONFIRMOU presença na sessão de RPG. Seja criativo, faça referências a acertos críticos ou rolagens de dados! Exemplo de inspiração: 'Todos confirmados! Preparem-se para uma sessão épica de RPG cheia de acertos e falhas críticas! 🎲🐉'"
 				} else {
-					finalMessage = "Looks like someone failed their commitment check. Always that one person... 🐔🐢"
+					finalMessagePrompt = "Gere uma mensagem engraçada e bem-humorada, em português do Brasil (pt-br), zoando pois alguém furou a sessão de RPG. Faça referências a testes de resistência falhos ou falta de compromisso. Exemplo de inspiração: 'Parece que alguém falhou no teste de compromisso. Sempre tem um... 🐔🐢'"
+				}
+
+				systemPrompt := fmt.Sprintf("\n[System Note: %s\nIMPORTANTE: Apenas retorne a mensagem final gerada, sem formatações adicionais ou aspas que bloqueiem a fala.]", finalMessagePrompt)
+
+				generatedMessage := ""
+				if m.ai != nil {
+					generatedMessage, _ = m.ai.SendMessage(context.Background(), chatID, event.Summary, systemPrompt)
+				}
+
+				if generatedMessage == "" {
+					if allYes {
+						generatedMessage = "Todos confirmados! Preparem-se para uma sessão de RPG épica e cheia de acertos e falhas críticas! 🎲🐉"
+					} else {
+						generatedMessage = "Parece que alguém falhou no teste de compromisso. Sempre tem um... 🐔🐢"
+					}
 				}
 
 				m.bot.SendMessage(context.Background(), &bot.SendMessageParams{
 					ChatID: chatID,
-					Text:   finalMessage,
+					Text:   generatedMessage,
 				})
 			}
 		}
@@ -258,11 +305,136 @@ func (m *Manager) Manage(args map[string]any) (string, error) {
 	}
 }
 
+func (m *Manager) StartEventMonitor(ctx context.Context, checkInterval time.Duration) {
+	ticker := time.NewTicker(checkInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			events := make(map[string]Event)
+			m.storage.LoadFromDB(eventsFileName, &events)
+
+			archivedEvents := make(map[string][]Event)
+			m.storage.LoadFromDB("archived_events.json", &archivedEvents)
+
+			changed := false
+			now := time.Now().Unix()
+
+			for chatIDStr, ev := range events {
+
+				// 12 hour reminder
+				if ev.Timestamp > 0 && !ev.Reminder12HourSent && ev.Timestamp-now <= 12*60*60 && ev.Timestamp-now > 60*60 {
+					durationSeconds := ev.Timestamp - now
+					var whenStr string
+					if durationSeconds >= 11*60*60+55*60 {
+						whenStr = "12 horas"
+					} else {
+						hours := durationSeconds / 3600
+						if hours == 1 {
+							whenStr = "1 hora"
+						} else {
+							whenStr = fmt.Sprintf("%d horas", hours)
+						}
+					}
+
+					sendReminder(m, chatIDStr, ev, whenStr)
+					ev.Reminder12HourSent = true
+					events[chatIDStr] = ev
+					changed = true
+				}
+
+				if ev.Timestamp > 0 && !ev.Reminder1HourSent && ev.Timestamp-now <= 60*60 && ev.Timestamp > now {
+					durationSeconds := ev.Timestamp - now
+					var whenStr string
+					if durationSeconds >= 55*60 {
+						whenStr = "1 hora"
+					} else {
+						minutes := durationSeconds / 60
+						if minutes <= 1 {
+							whenStr = "1 minuto"
+						} else {
+							whenStr = fmt.Sprintf("%d minutos", minutes)
+						}
+					}
+
+					sendReminder(m, chatIDStr, ev, whenStr)
+					ev.Reminder1HourSent = true
+					events[chatIDStr] = ev
+					changed = true
+				}
+
+				if ev.Timestamp > 0 && ev.Timestamp <= now {
+					if !ev.ReminderNowSent {
+						sendReminder(m, chatIDStr, ev, "agora")
+						ev.ReminderNowSent = true
+					}
+					archivedEvents[chatIDStr] = append(archivedEvents[chatIDStr], ev)
+					delete(events, chatIDStr)
+					changed = true
+					log.Printf("Alert: Event '%s' has been deleted/archived for chat %s", ev.Summary, chatIDStr)
+				}
+			}
+
+			if changed {
+				m.storage.SaveToDBAsync("archived_events.json", archivedEvents)
+				m.storage.SaveToDBAsync(eventsFileName, events)
+			}
+		}
+	}
+}
+
+func sendReminder(m *Manager, chatIDStr string, ev Event, when string) {
+	var confirmedUsers []string
+	for u, conf := range ev.Confirmations {
+		if conf == "💪" || strings.HasPrefix(conf, "🐢") {
+			confirmedUsers = append(confirmedUsers, u)
+		}
+	}
+
+	if len(confirmedUsers) == 0 {
+		return
+	}
+
+	chatID, err := strconv.ParseInt(chatIDStr, 10, 64)
+	if err != nil {
+		return
+	}
+
+	tags := strings.Join(confirmedUsers, " ")
+
+	var timeMsg string
+	if when == "agora" {
+		timeMsg = "AGORA"
+	} else {
+		timeMsg = "daqui a " + when
+	}
+
+	systemPrompt := fmt.Sprintf("\n[System Note: Gere uma mensagem animada, nerd e curta em português (pt-br) avisando que a sessão '%s' vai começar %s! Diga para eles se prepararem. No final da mensagem, certifique-se de incluir as seguintes marcações (tags dos usuários) exatamente como estão para chamá-los: %s]", ev.Summary, timeMsg, tags)
+
+	generatedMessage := ""
+	if m.ai != nil {
+		generatedMessage, _ = m.ai.SendMessage(context.Background(), chatID, ev.Summary, systemPrompt)
+	}
+	if generatedMessage == "" {
+		generatedMessage = fmt.Sprintf("Atenção %s! O evento '%s' começa %s!", tags, ev.Summary, timeMsg)
+	}
+	
+	log.Printf("Alert: Reminder sent for event '%s' (%s) to chat %s", ev.Summary, timeMsg, chatIDStr)
+	
+	m.bot.SendMessage(context.Background(), &bot.SendMessageParams{
+		ChatID: chatID,
+		Text:   generatedMessage,
+	})
+}
+
 func GetToolConfig() *genai.Tool {
 	return &genai.Tool{
 		FunctionDeclarations: []*genai.FunctionDeclaration{
 			{
-				Name:        EventManageToolName,
+				Name: EventManageToolName,
 				Description: `Manages events. Can create, remove, get the current event, or update_status for a user reacting via DM. Before creating an event, the system will automatically check if a group exists and if an event already exists. Don't ever need to send the chat ID back to the user.
 
 CRITICAL INSTRUCTIONS FOR CREATING EVENTS:
@@ -270,6 +442,8 @@ CRITICAL INSTRUCTIONS FOR CREATING EVENTS:
 2) If the user provides a relative date like "next Friday", interpret it and provide a fully human-readable format in pt-br (including the timezone) in the 'date' argument before calling the tool. For example: 'Sexta-feira, 20/03/2026 às 21:00 BRT'. DO NOT use internal string formats like '2026-03-20 21:00:00'.
 3) DO NOT ask the user for an event name, title, or summary. The system will automatically use the chat title as the event summary internally!
 4) After calling 'create', do not reply explaining what you did. The group is already notified automatically.
+5) You MUST provide the 'iso_date' argument as an exact ISO 8601 string completely including the correct timezone offset (e.g. '2026-03-20T21:00:00-03:00'). CRITICAL: If the user does not explicitly specify a timezone (like BRT or EDT), YOU MUST NOT CALL THIS TOOL! You must abort, reply to the user naturally, and ask them "Qual o fuso horário?" before you create the event. Only call this tool when the timezone is definitively known.
+6) If the user asks to schedule an event for a time TODAY that has ALREADY PASSED, DO NOT silently schedule it for tomorrow! You must refuse and ask them explicitly if they meant tomorrow.
 
 CRITICAL INSTRUCTION FOR UPDATE_STATUS:
 1) If you receive a System Note indicating the user is responding to an event via DM, you MUST use 'update_status'. Parse their answer (yes, no, or late) and immediately call the tool. Do NOT just reply 'I'll keep that in mind' - you must always call 'event_manage(action="update_status")'`,
@@ -288,6 +462,10 @@ CRITICAL INSTRUCTION FOR UPDATE_STATUS:
 						"date": {
 							Type:        "string",
 							Description: "Date and time of the event. REQUIRED for 'create' action. Omit for other actions.",
+						},
+						"iso_date": {
+							Type:        "string",
+							Description: "The exact date and time of the event in ISO 8601 format INCLUDING timezone offset. Do NOT guess the timezone; if none is provided, do NOT call this tool and ask the user for it first. REQUIRED.",
 						},
 						"username": {
 							Type:        "string",

@@ -70,7 +70,9 @@ func (c *Client) SendMessage(ctx context.Context, chatID int64, chatTitle string
 
 			functionResult, err := toolConfig.Function(call.Args)
 			if err != nil {
-				part := genai.NewPartFromText(fmt.Sprintf("Error executing function %s: %v", call.Name, err))
+				part := genai.NewPartFromFunctionResponse(call.Name, map[string]any{
+					"error": fmt.Sprintf("%v", err),
+				})
 				response = append(response, part)
 				continue
 			}
