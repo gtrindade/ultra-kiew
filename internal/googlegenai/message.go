@@ -3,6 +3,7 @@ package googlegenai
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"google.golang.org/genai"
@@ -101,6 +102,11 @@ func (c *Client) SendMessage(ctx context.Context, chatID int64, chatTitle string
 	}
 
 	responseText := result.Text()
+	
+	// Strip AI hallucinated log prefixes like "[2026-04-03T23... - bot]: "
+	prefixRegex := regexp.MustCompile(`^\[\d[^\]]*\][^:]*:\s*`)
+	responseText = prefixRegex.ReplaceAllString(responseText, "")
+	responseText = strings.TrimSpace(responseText)
 	
 	if strings.Contains(responseText, "__SILENT__") {
 		return "", nil

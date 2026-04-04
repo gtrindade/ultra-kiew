@@ -20,9 +20,9 @@ const (
 )
 
 type Event struct {
-	Date          string            `json:"date"`
-	Timestamp     int64             `json:"timestamp,omitempty"`
-	Summary       string            `json:"summary"`
+	Date               string            `json:"date"`
+	Timestamp          int64             `json:"timestamp,omitempty"`
+	Summary            string            `json:"summary"`
 	MessageID          int               `json:"messageID"`
 	Confirmations      map[string]string `json:"confirmations"`
 	Reminder12HourSent bool              `json:"reminder_12h_sent,omitempty"`
@@ -102,7 +102,7 @@ func (m *Manager) Manage(args map[string]any) (string, error) {
 		if !ok || isoDate == "" {
 			return "", fmt.Errorf("iso_date is required to create an event and must be in ISO 8601 format")
 		}
-		
+
 		t, err := time.Parse(time.RFC3339, isoDate)
 		if err != nil {
 			return "", fmt.Errorf("invalid iso_date format. Must be ISO 8601 with timezone (e.g., '2026-04-03T21:00:00-03:00'). Error: %v", err)
@@ -143,7 +143,7 @@ func (m *Manager) Manage(args map[string]any) (string, error) {
 				if uid, exists := knownUsers[u]; exists {
 					_, err := m.bot.SendMessage(context.Background(), &bot.SendMessageParams{
 						ChatID: uid,
-						Text:   fmt.Sprintf("%q %s. Rola? se for atrasar, me dê uma estimativa", summary, date),
+						Text:   fmt.Sprintf("%q %s. Vai? Se for atrasar, me dê uma estimativa", summary, date),
 					})
 					if err != nil {
 						missingUsers = append(missingUsers, u)
@@ -176,7 +176,7 @@ func (m *Manager) Manage(args map[string]any) (string, error) {
 		if _, exists := events[chatIDStr]; !exists {
 			return fmt.Sprintf("No event exists for chat %d", chatID), nil
 		}
-		
+
 		summary := events[chatIDStr].Summary
 		delete(events, chatIDStr)
 		m.storage.SaveToDBAsync(eventsFileName, events)
@@ -326,7 +326,7 @@ func (m *Manager) StartEventMonitor(ctx context.Context, checkInterval time.Dura
 			for chatIDStr, ev := range events {
 
 				// 12 hour reminder
-				if ev.Timestamp > 0 && !ev.Reminder12HourSent && ev.Timestamp-now <= 12*60*60 && ev.Timestamp-now > 60*60 {
+				if ev.Timestamp > 0 && !ev.Reminder12HourSent && ev.Timestamp-now <= 12*60*60 && ev.Timestamp-now > 2*60*60 {
 					durationSeconds := ev.Timestamp - now
 					var whenStr string
 					if durationSeconds >= 11*60*60+55*60 {
@@ -421,9 +421,9 @@ func sendReminder(m *Manager, chatIDStr string, ev Event, when string) {
 	if generatedMessage == "" {
 		generatedMessage = fmt.Sprintf("Atenção %s! O evento '%s' começa %s!", tags, ev.Summary, timeMsg)
 	}
-	
+
 	log.Printf("Alert: Reminder sent for event '%s' (%s) to chat %s", ev.Summary, timeMsg, chatIDStr)
-	
+
 	m.bot.SendMessage(context.Background(), &bot.SendMessageParams{
 		ChatID: chatID,
 		Text:   generatedMessage,
