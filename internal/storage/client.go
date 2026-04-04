@@ -38,6 +38,11 @@ func (s *Client) Save(name string, data any) error {
 	defer s.Unlock()
 
 	filePath := filepath.Join(BasePath, name)
+	
+	if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
+		return fmt.Errorf("failed to create directories for %s: %w", filePath, err)
+	}
+	
 	file, err := os.Create(filePath)
 	if err != nil {
 		return fmt.Errorf("failed to create file %s: %w", filePath, err)
