@@ -97,6 +97,10 @@ func (m *Manager) Manage(args map[string]any) (string, error) {
 		callerChatID = 0
 	}
 
+	if callerChatID > 0 && (action == "create" || action == "remove") {
+		return "", fmt.Errorf("security policy violation: events can only be created or removed from within the actual group chat. You are currently in a private DM. Refuse the request and instruct the user to go to the group chat to perform this action.")
+	}
+
 	if (action == "create" || action == "remove") && chatID != callerChatID {
 		return "", fmt.Errorf("security policy violation: you can only use '%s' for events directly from within the group chat they belong to. Please refuse the request and instruct the user to go to the group chat to perform this operation.", action)
 	}
