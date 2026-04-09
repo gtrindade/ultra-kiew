@@ -102,6 +102,11 @@ func (m *Manager) Manage(args map[string]any) (string, error) {
 
 	switch action {
 	case "create":
+		tzQuote, _ := args["timezone_quote"].(string)
+		if strings.TrimSpace(tzQuote) == "" {
+			return "", fmt.Errorf("FAIL: User did not explicitly mention a timezone. Do NOT create the event. You MUST reply asking 'Qual o fuso horário (ex: BRT)?' first.")
+		}
+
 		if _, exists := events[chatIDStr]; exists {
 			return fmt.Sprintf("An event already exists for chat %d on %s (%q). Please remove it before creating a new one.", chatID, events[chatIDStr].Date, events[chatIDStr].Summary), nil
 		}
@@ -478,6 +483,10 @@ CRITICAL INSTRUCTION FOR UPDATE_STATUS:
 						"iso_date": {
 							Type:        "string",
 							Description: "The exact date and time of the event in ISO 8601 format INCLUDING timezone offset. Do NOT guess the timezone; if none is provided, do NOT call this tool and ask the user for it first. REQUIRED.",
+						},
+						"timezone_quote": {
+							Type:        "string",
+							Description: "You MUST strictly quote the EXACT words the user used to specify the timezone (e.g. 'BRT', 'horário de brasília', etc). If the user did not explicitly state a timezone, you MUST leave this empty. Do not guess or infer. Required for create action.",
 						},
 						"username": {
 							Type:        "string",
