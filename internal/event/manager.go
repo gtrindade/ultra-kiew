@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/go-telegram/bot"
+	"github.com/go-telegram/bot/models"
 	"github.com/gtrindade/ultra-kiew/internal/googlegenai"
 	"github.com/gtrindade/ultra-kiew/internal/storage"
 	"google.golang.org/genai"
@@ -187,10 +188,14 @@ func (m *Manager) Manage(args map[string]any) (string, error) {
 		m.storage.SaveToDBAsync(eventsFileName, events)
 
 		if len(missingUsers) > 0 && m.bot != nil {
-			m.bot.SendMessage(context.Background(), &bot.SendMessageParams{
+			params := &bot.SendMessageParams{
 				ChatID: chatID,
 				Text:   fmt.Sprintf("Aviso: Não foi possível enviar uma mensagem direta para os seguintes usuários porque eles ainda não iniciaram este bot: %v. Por favor, peça a eles para me enviarem uma DM para iniciar o bot!", missingUsers),
-			})
+			}
+			if messageID != 0 {
+				params.ReplyParameters = &models.ReplyParameters{MessageID: messageID}
+			}
+			m.bot.SendMessage(context.Background(), params)
 		}
 		return fmt.Sprintf("Successfully created event for chat %d on %s with summary %q. EVENT SUMMARY ALREADY SENT TO CHAT. DO NOT EXPLAIN OR ADD EMOJIS. YOUR ONLY JOB NOW IS TO OUTPUT EXACTLY '__SILENT__' SO NO SPAM IS SENT.", chatID, date, summary), nil
 
@@ -313,10 +318,14 @@ func (m *Manager) Manage(args map[string]any) (string, error) {
 					}
 				}
 
-				m.bot.SendMessage(context.Background(), &bot.SendMessageParams{
+				params := &bot.SendMessageParams{
 					ChatID: chatID,
 					Text:   generatedMessage,
-				})
+				}
+				if event.MessageID != 0 {
+					params.ReplyParameters = &models.ReplyParameters{MessageID: event.MessageID}
+				}
+				m.bot.SendMessage(context.Background(), params)
 			}
 		}
 
@@ -446,10 +455,14 @@ func sendReminder(m *Manager, chatIDStr string, ev Event, when string) {
 
 	log.Printf("Alert: Reminder sent for event '%s' (%s) to chat %s", ev.Summary, timeMsg, chatIDStr)
 
-	m.bot.SendMessage(context.Background(), &bot.SendMessageParams{
+	params := &bot.SendMessageParams{
 		ChatID: chatID,
 		Text:   generatedMessage,
-	})
+	}
+	if ev.MessageID != 0 {
+		params.ReplyParameters = &models.ReplyParameters{MessageID: ev.MessageID}
+	}
+	m.bot.SendMessage(context.Background(), params)
 }
 
 func GetToolConfig() *genai.Tool {
