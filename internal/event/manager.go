@@ -19,6 +19,19 @@ const (
 	eventsFileName      = "events.json"
 )
 
+func formatPTBRDate(t time.Time) string {
+	daysOfWeek := map[time.Weekday]string{
+		time.Sunday:    "Domingo",
+		time.Monday:    "Segunda-feira",
+		time.Tuesday:   "Terça-feira",
+		time.Wednesday: "Quarta-feira",
+		time.Thursday:  "Quinta-feira",
+		time.Friday:    "Sexta-feira",
+		time.Saturday:  "Sábado",
+	}
+	return fmt.Sprintf("%s, %s às %s", daysOfWeek[t.Weekday()], t.Format("02/01/2006"), t.Format("15:04 MST"))
+}
+
 type Event struct {
 	Date               string            `json:"date"`
 	Timestamp          int64             `json:"timestamp,omitempty"`
@@ -93,11 +106,6 @@ func (m *Manager) Manage(args map[string]any) (string, error) {
 			return fmt.Sprintf("No group exists for this chat %d. A group must be created first before scheduling an event.", chatID), nil
 		}
 
-		date, ok := args["date"].(string)
-		if !ok || date == "" {
-			return "", fmt.Errorf("date is required to create an event. If the user didn't specify one, do not try to guess. Just respond to the user naturally and ask them when they'd like to schedule the event.")
-		}
-
 		isoDate, ok := args["iso_date"].(string)
 		if !ok || isoDate == "" {
 			return "", fmt.Errorf("iso_date is required to create an event and must be in ISO 8601 format")
@@ -108,6 +116,8 @@ func (m *Manager) Manage(args map[string]any) (string, error) {
 			return "", fmt.Errorf("invalid iso_date format. Must be ISO 8601 with timezone (e.g., '2026-04-03T21:00:00-03:00'). Error: %v", err)
 		}
 		timestamp := t.Unix()
+		
+		date := formatPTBRDate(t)
 
 		if timestamp <= time.Now().Unix() {
 			return "", fmt.Errorf("FAILED! The requested event time evaluates to a time in the past! THE EVENT WAS NOT CREATED! The user scheduled the event for %s which has already happened. You MUST explain that it has already passed.", isoDate)
@@ -439,11 +449,10 @@ func GetToolConfig() *genai.Tool {
 
 CRITICAL INSTRUCTIONS FOR CREATING EVENTS:
 1) If the user doesn't specify a date, YOU MUST NOT call this tool. Instead, reply naturally and ask the user when they want to schedule the event.
-2) If the user provides a relative date like "next Friday", interpret it and provide a fully human-readable format in pt-br (including the timezone) in the 'date' argument before calling the tool. For example: 'Sexta-feira, 20/03/2026 às 21:00 BRT'. DO NOT use internal string formats like '2026-03-20 21:00:00'.
-3) DO NOT ask the user for an event name, title, or summary. The system will automatically use the chat title as the event summary internally!
-4) After calling 'create', do not reply explaining what you did. The group is already notified automatically.
-5) You MUST provide the 'iso_date' argument as an exact ISO 8601 string completely including the correct timezone offset (e.g. '2026-03-20T21:00:00-03:00'). CRITICAL: If the user does not explicitly specify a timezone (like BRT or EDT), YOU MUST NOT CALL THIS TOOL! You must abort, reply to the user naturally, and ask them "Qual o fuso horário?" before you create the event. Only call this tool when the timezone is definitively known.
-6) If the user asks to schedule an event for a time TODAY that has ALREADY PASSED, DO NOT silently schedule it for tomorrow! You must refuse and ask them explicitly if they meant tomorrow.
+2) DO NOT ask the user for an event name, title, or summary. The system will automatically use the chat title as the event summary internally!
+3) After calling 'create', do not reply explaining what you did. The group is already notified automatically.
+4) You MUST provide the 'iso_date' argument as an exact ISO 8601 string completely including the correct timezone offset (e.g. '2026-03-20T21:00:00-03:00'). CRITICAL: If the user does not explicitly specify a timezone (like BRT or EDT), YOU MUST NOT CALL THIS TOOL! You must abort, reply to the user naturally, and ask them "Qual o fuso horário?" before you create the event. Only call this tool when the timezone is definitively known.
+5) If the user asks to schedule an event for a time TODAY that has ALREADY PASSED, DO NOT silently schedule it for tomorrow! You must refuse and ask them explicitly if they meant tomorrow.
 
 CRITICAL INSTRUCTION FOR UPDATE_STATUS:
 1) If you receive a System Note indicating the user is responding to an event via DM, you MUST use 'update_status'. Parse their answer (yes, no, or late) and immediately call the tool. Do NOT just reply 'I'll keep that in mind' - you must always call 'event_manage(action="update_status")'`,
@@ -458,10 +467,6 @@ CRITICAL INSTRUCTION FOR UPDATE_STATUS:
 						"chatID": {
 							Type:        "integer",
 							Description: "Chat ID to associate with the event. Generally found at the end of the context message. HOWEVER, if using 'update_status' from a DM System Note, you MUST use the specific group chat ID provided in that note, completely ignoring the DM chat ID at the end of the prompt.",
-						},
-						"date": {
-							Type:        "string",
-							Description: "Date and time of the event. REQUIRED for 'create' action. Omit for other actions.",
 						},
 						"iso_date": {
 							Type:        "string",
