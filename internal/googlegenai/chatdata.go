@@ -3,6 +3,7 @@ package googlegenai
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"google.golang.org/genai"
@@ -73,7 +74,7 @@ var (
 							Enum: validActions,
 						},
 						"chatID": {
-							Type:        "integer",
+							Type:        "string",
 							Description: "Chat ID to associate with the data. It will always be available in the format at the end of the message. You can only take the chatID from the end of the message, if there are multiple chatIDs, take the last one.",
 						},
 						"path": {
@@ -150,6 +151,12 @@ func getNumber[T ~float64 | ~int | ~int64](value any) (T, error) {
 		num = T(x)
 	} else if x, ok := value.(int); ok {
 		num = T(x)
+	} else if xStr, ok := value.(string); ok {
+		f, err := strconv.ParseFloat(xStr, 64)
+		if err != nil {
+			return num, fmt.Errorf("failed to parse string as number")
+		}
+		num = T(f)
 	} else {
 		return num, fmt.Errorf("failed to parse number")
 	}

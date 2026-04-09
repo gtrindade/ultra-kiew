@@ -2,6 +2,7 @@ package group
 
 import (
 	"fmt"
+	"strconv"
 
 	"github.com/gtrindade/ultra-kiew/internal/storage"
 	"google.golang.org/genai"
@@ -28,11 +29,18 @@ func NewManager(storageClient *storage.Client) *Manager {
 }
 
 func (m *Manager) Manage(args map[string]any) (string, error) {
-	chatIDFloat, ok := args["chatID"].(float64)
-	if !ok {
-		return "", fmt.Errorf("invalid argument: chatID is required and must be a number")
+	var chatID int64
+	if v, ok := args["chatID"].(float64); ok {
+		chatID = int64(v)
+	} else if vStr, ok := args["chatID"].(string); ok {
+		var err error
+		chatID, err = strconv.ParseInt(vStr, 10, 64)
+		if err != nil {
+			return "", fmt.Errorf("invalid argument: chatID must be a valid number string")
+		}
+	} else {
+		return "", fmt.Errorf("invalid argument: chatID is required and must be a number or string")
 	}
-	chatID := int64(chatIDFloat)
 
 	action, ok := args["action"].(string)
 	if !ok {
@@ -135,7 +143,7 @@ func GetToolConfig() *genai.Tool {
 							Enum:        []string{"create", "remove", "list"},
 						},
 						"chatID": {
-							Type:        "integer",
+							Type:        "string",
 							Description: "Chat ID to associate with the group. It will always be available in the format at the end of the context message. You can only take the chatID from the end of the message, if there are multiple chatIDs, take the last one.",
 						},
 						"users": {
