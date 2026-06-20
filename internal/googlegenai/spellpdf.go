@@ -48,7 +48,11 @@ func (c *Client) SpellLookupOnPDF(args map[string]any) (string, error) {
 
 	fmt.Printf("Looking up spell: %q\n", spellName)
 
-	spellCompendium, err := c.GetFile(ctx, c.fileMap[SpellCompendium].Name)
+	var fileID string
+	if c.fileMap != nil && c.fileMap[SpellCompendium] != nil {
+		fileID = c.fileMap[SpellCompendium].Name
+	}
+	spellCompendium, err := c.GetFile(ctx, fileID)
 	if err != nil {
 		filePath := path.Join(storage.BasePath, storage.PDFsPath, SpellCompendium)
 		spellCompendium, err = c.UploadFile(ctx, filePath, SpellCompendium)

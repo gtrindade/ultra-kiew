@@ -3,6 +3,7 @@ package telegram
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"os/signal"
 	"strings"
@@ -103,7 +104,7 @@ func (c *Client) handler(ctx context.Context, b *bot.Bot, update *models.Update)
 	response, err = c.ai.SendMessage(ctx, chatID, text)
 
 	if err != nil {
-		fmt.Printf("Failed to send message: %v", err)
+		log.Printf("Failed to send message to AI: %v", err)
 		response = "Sorry, something went wrong."
 	}
 
@@ -114,11 +115,14 @@ func (c *Client) handler(ctx context.Context, b *bot.Bot, update *models.Update)
 		}
 	}
 
-	b.SendMessage(ctx, &bot.SendMessageParams{
+	_, err = b.SendMessage(ctx, &bot.SendMessageParams{
 		ReplyParameters: replyParams,
 		ChatID:          chatID,
 		Text:            response,
 	})
+	if err != nil {
+		log.Printf("Failed to send Telegram message: %v", err)
+	}
 }
 
 func getMessageFromUpdate(update *models.Update) *SavedMessage {

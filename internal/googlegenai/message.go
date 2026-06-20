@@ -3,6 +3,7 @@ package googlegenai
 import (
 	"context"
 	"fmt"
+	"log"
 
 	"google.golang.org/genai"
 )
@@ -21,6 +22,7 @@ func (c *Client) SendMessageWithParts(ctx context.Context, chatID int64, parts [
 	}
 	result, err := chat.Send(ctx, parts...)
 	if err != nil {
+		log.Printf("Error sending message to GenAI with parts: %v", err)
 		return "", err
 	}
 
@@ -47,6 +49,7 @@ func (c *Client) SendMessage(ctx context.Context, chatID int64, text string) (st
 	parts := []*genai.Part{genai.NewPartFromText(msg)}
 	result, err := chat.Send(ctx, parts...)
 	if err != nil {
+		log.Printf("Error sending message to GenAI: %v", err)
 		return "", fmt.Errorf("failed to send message: %w", err)
 	}
 
@@ -63,6 +66,7 @@ func (c *Client) SendMessage(ctx context.Context, chatID int64, text string) (st
 
 			functionResult, err := toolConfig.Function(call.Args)
 			if err != nil {
+				log.Printf("Error executing function %s: %v", call.Name, err)
 				part := genai.NewPartFromText(fmt.Sprintf("Error executing function %s: %v", call.Name, err))
 				response = append(response, part)
 				continue
@@ -83,6 +87,7 @@ func (c *Client) SendMessage(ctx context.Context, chatID int64, text string) (st
 		if len(response) > 0 {
 			result, err = chat.Send(ctx, response...)
 			if err != nil {
+				log.Printf("Error sending function response to GenAI: %v", err)
 				return "", fmt.Errorf("failed to send function response: %w", err)
 			}
 			functionCalls = result.FunctionCalls()
