@@ -38,11 +38,11 @@ func (s *Client) Save(name string, data any) error {
 	defer s.Unlock()
 
 	filePath := filepath.Join(BasePath, name)
-	
+
 	if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
 		return fmt.Errorf("failed to create directories for %s: %w", filePath, err)
 	}
-	
+
 	file, err := os.Create(filePath)
 	if err != nil {
 		return fmt.Errorf("failed to create file %s: %w", filePath, err)
@@ -96,6 +96,18 @@ func (c *Client) LoadFromDB(name string, data any) error {
 	return c.Load(filepath.Join(DBPath, name), data)
 }
 
+// SaveToDB saves data to a file in the predefined database path and does not
+// return until it is written.
+//
+// Use this for anything the bot is about to claim it did. The async variant
+// returns before the write lands, so a tool could answer "event created" and
+// then lose it to a crash, and two async saves of the same file have no
+// ordering between them. Chat history can afford that; events and groups
+// cannot.
+func (c *Client) SaveToDB(name string, data any) error {
+	return c.Save(filepath.Join(DBPath, name), data)
+}
+
 // SaveToDBAsync saves data to a file in the predefined database path asynchronously.
 func (c *Client) SaveToDBAsync(name string, data any) {
 	c.SaveAsync(filepath.Join(DBPath, name), data)
@@ -122,4 +134,14 @@ func (s *Client) Delete(name string) error {
 	}
 
 	return nil
+}
+
+// MustSave writes data to the database path, logging rather than returning an
+// error. Callers that have already decided to act want the write attempted and
+// the failure recorded; there is nothing useful to tell the user mid-tool-call
+// beyond what the next read will show anyway.
+func (c *Client) MustSave(name string, data any) {
+	if err := c.SaveToDB(name, data); err != nil {
+		fmt.Printf("CRITICAL: failed to persist %s: %v\n", name, err)
+	}
 }

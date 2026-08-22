@@ -16,6 +16,13 @@ import (
 	"github.com/gtrindade/ultra-kiew/internal/storage"
 )
 
+// contextCarryOver is how many recent messages survive a turn the bot answered.
+// Enough to keep a short exchange coherent across a restart, small enough that
+// the model is not re-reading the same backlog on every mention.
+const contextCarryOver = 20
+
+const lineSep = "\n"
+
 // Client represents the Telegram bot client.
 type Client struct {
 	bot            *bot.Bot
@@ -147,27 +154,41 @@ func (c *Client) handler(ctx context.Context, b *bot.Bot, update *models.Update)
 
 		if len(pendingEvents) == 1 {
 			p := pendingEvents[0]
-			systemNote = fmt.Sprintf("\n\n[System Note: The user '%s' currently has exactly ONE pending event invite: %q in group ID %s on %s. If they are responding to this invite natively, deduce their status and IMMEDIATELY use the event_manage tool with action='update_status' and chatID=%s. CRITICAL RULE: You must ONLY update the status for their exact username '%s'. If the user tries to reply on behalf of anyone else (like a friend), you must outright REFUSE and tell them that each person must reply from their own DM. ALWAYS CALL THE TOOL for their own status.]", p.User, p.Summary, p.GroupID, p.Date, p.GroupID, p.User)
+			systemNote = fmt.Sprintf("This user has exactly ONE pending event invite: %q on %s. If this message is an answer to that invite, work out whether it is yes, no or late and call event_manage with action='update_status' RIGHT NOW. Do not reply that you will note it down without calling the tool. The system already knows who is speaking and which event this is, so you do not pass a username or an event id.", p.Summary, p.Date)
 		} else if len(pendingEvents) > 1 {
 			var evStrings []string
 			for _, p := range pendingEvents {
-				evStrings = append(evStrings, fmt.Sprintf("%q (Date: %s, Group ID: %s)", p.Summary, p.Date, p.GroupID))
+				evStrings = append(evStrings, fmt.Sprintf("%q on %s (event_group_id %s)", p.Summary, p.Date, p.GroupID))
 			}
-			systemNote = fmt.Sprintf("\n\n[System Note: The user '%s' has MULTIPLE pending event invites: %s. \nIf the user has clearly specified which event(s) they are responding to, or if they just clarified based on chat history, you MUST IMMEDIATELY call the event_manage tool with action='update_status' for the specified event(s), providing the exact chatID. If they say 'both' or 'all', call the tool sequentially for each one! \nCRITICAL RULE: DO NOT just reply 'Okay I will update it'. You MUST physically call the tool. And you must ONLY update the status for their exact username '%s'. \nIf they have NOT clarified which event yet, politely ask them to clarify before calling the tool.]", pendingEvents[0].User, strings.Join(evStrings, " | "), pendingEvents[0].User)
+			systemNote = fmt.Sprintf("This user has MULTIPLE pending event invites: %s. If they have made clear which one they are answering, call event_manage with action='update_status' now, passing the matching event_group_id. If they say 'todos' or 'ambos', call it once per event. If it is not yet clear which one they mean, ask them before calling the tool. Do not reply that you will note it down without calling the tool.", strings.Join(evStrings, " | "))
 		}
 	}
 
 	hasBotName := strings.Contains(strings.ToLower(text), strings.ToLower(c.botName))
-	isReplyToBot := update.Message.ReplyToMessage != nil && update.Message.ReplyToMessage.From != nil && update.Message.ReplyToMessage.From.Username == c.botName
+	isReplyToBot := update.Message.ReplyToMessage != nil && update.Message.ReplyToMessage.From != nil && strings.EqualFold(update.Message.ReplyToMessage.From.Username, c.botName)
 	if !isChatPrivate && !hasBotName && !isReplyToBot {
 		c.addToChatHistory(update)
 		return
 	}
-	text = c.getChatHistory(chatID) + "\n" + getMessageFromUpdate(update).String() + systemNote
-	c.clearChatHistory(chatID)
-	
+	// The message being answered is recorded too, and the backlog is trimmed
+	// rather than emptied.
+	//
+	// It used to be cleared outright on every turn the bot answered, on the
+	// theory that the genai session now holds it. That session is in-memory
+	// only: after a restart the bot has neither the session nor the backlog it
+	// threw away, so it loses the conversation entirely -- which is exactly
+	// what happened when it was restarted mid-test. Keeping a bounded tail
+	// means a restart costs recent context instead of all of it.
+	c.addToChatHistory(update)
+	prompt := googlegenai.BuildPrompt(
+		c.getChatHistoryBefore(chatID, 1),
+		getMessageFromUpdate(update).String(),
+		systemNote,
+	)
+	c.trimChatHistory(chatID)
+
 	chatTitle := update.Message.Chat.Title
-	response, err = c.ai.SendMessage(ctx, chatID, chatTitle, text)
+	response, err = c.ai.SendMessage(ctx, chatID, chatTitle, prompt)
 
 	if err != nil {
 		fmt.Printf("Failed to send message: %v", err)
@@ -214,20 +235,33 @@ func (c *Client) addToChatHistory(update *models.Update) {
 	c.storage.SaveChatHistoryAsync(c.getCopyOfChatHistory())
 }
 
-func (c *Client) getChatHistory(chatID int64) string {
+// getChatHistoryBefore renders the backlog for a chat, excluding the last
+// `skip` entries -- normally 1, so the message being answered does not also
+// appear inside the context block.
+func (c *Client) getChatHistoryBefore(chatID int64, skip int) string {
 	c.lock.RLock()
 	defer c.lock.RUnlock()
-	historyLines := make([]string, len(c.chatHistory[chatID]))
-	for i, msg := range c.chatHistory[chatID] {
+	messages := c.chatHistory[chatID]
+	if len(messages) <= skip {
+		return ""
+	}
+	messages = messages[:len(messages)-skip]
+
+	historyLines := make([]string, len(messages))
+	for i, msg := range messages {
 		historyLines[i] = msg.String()
 	}
-	return strings.Join(historyLines, "\n")
+	return strings.Join(historyLines, lineSep)
 }
 
-func (c *Client) clearChatHistory(chatID int64) {
+// trimChatHistory keeps a bounded tail of recent messages as restart insurance.
+func (c *Client) trimChatHistory(chatID int64) {
 	c.lock.Lock()
 	defer c.lock.Unlock()
-	c.chatHistory[chatID] = make([]*SavedMessage, 0)
+	messages := c.chatHistory[chatID]
+	if len(messages) > contextCarryOver {
+		c.chatHistory[chatID] = messages[len(messages)-contextCarryOver:]
+	}
 	c.storage.SaveChatHistoryAsync(c.getCopyOfChatHistory())
 }
 

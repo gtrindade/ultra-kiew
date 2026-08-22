@@ -56,7 +56,7 @@ var (
 						There are no restrictions on property names - any valid identifier can be used.
 						New characters and properties are automatically created when setting values.
 
-						Don't ever need to send the chat ID back to the user.
+						The chat this applies to is determined automatically by the system. You do not have a chat ID, never ask for one and never mention one.
 						`,
 				Parameters: &genai.Schema{
 					Type: "object",
@@ -73,10 +73,6 @@ var (
 							`,
 							Enum: validActions,
 						},
-						"chatID": {
-							Type:        "string",
-							Description: "Chat ID to associate with the data. It will always be available in the format at the end of the message. You can only take the chatID from the end of the message, if there are multiple chatIDs, take the last one.",
-						},
 						"path": {
 							Type:        "string",
 							Description: "Access path in format character.property using valid identifiers without spaces or special characters. Not required for show action.",
@@ -90,7 +86,7 @@ var (
 							Description: "Quantity of the item to add or remove when using add or remove actions (optional, defaults to 1)",
 						},
 					},
-					Required: []string{"action", "path"},
+					Required: []string{"action"},
 				},
 			},
 		},
@@ -176,9 +172,10 @@ func (c *Client) saveChatData(chatID int64, data map[string]string) {
 }
 
 func (c *Client) ChatData(args map[string]any) (string, error) {
-	chatID, err := getNumber[int64](args["chatID"])
-	if err != nil {
-		return "", fmt.Errorf("invalid argument: chatID is missing or not a number")
+	// The chat is supplied by the code, not by the model. See group.Manage.
+	chatID, ok := args[ArgCallerChatID].(int64)
+	if !ok {
+		return "", fmt.Errorf("internal error: caller chat context is missing")
 	}
 
 	action, ok := args["action"].(string)
@@ -204,10 +201,17 @@ func (c *Client) ChatData(args map[string]any) (string, error) {
 		quantity = 1
 	}
 
-	if c.chatData[chatID] == nil {
-		c.loadChatData(chatID)
-	}
+	// Guarded because the event monitor goroutine and the Telegram handler both
+	// reach this map; an unguarded concurrent write aborts the process.
+	c.lock.RLock()
 	chatData := c.chatData[chatID]
+	c.lock.RUnlock()
+	if chatData == nil {
+		c.loadChatData(chatID)
+		c.lock.RLock()
+		chatData = c.chatData[chatID]
+		c.lock.RUnlock()
+	}
 
 	fmt.Printf("Performing action: %q with path: %s and value: %s\n", action, path, value)
 	switch action {
