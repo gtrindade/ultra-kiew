@@ -2,7 +2,9 @@ package googlegenai
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log"
 	"regexp"
 	"strings"
 	"time"
@@ -11,6 +13,17 @@ import (
 )
 
 const MaxFunctionResponseLength = 10000
+
+// Retry policy for a single exchange with the model.
+//
+// An empty reply from Gemini is a known transient fault, not an answer: the
+// model hands back a candidate with nothing usable in it, most often right
+// after a tool round. Asking again with the identical input usually just
+// works, so it is retried here instead of being reported to the user.
+const (
+	maxSendAttempts = 3
+	sendRetryDelay  = 700 * time.Millisecond
+)
 
 // Keys injected into every tool call by the code. The model can also emit keys
 // with these names -- we always overwrite them after the model's args are read,
@@ -104,7 +117,7 @@ func (c *Client) SendMessageWithParts(ctx context.Context, chatID int64, parts [
 	if err != nil {
 		return "", fmt.Errorf("failed to create new chat: %w", err)
 	}
-	result, err := chat.Send(ctx, parts...)
+	result, err := c.sendWithRetry(ctx, chat, chatID, parts...)
 	if err != nil {
 		return "", err
 	}
@@ -130,17 +143,21 @@ func (c *Client) SendMessage(ctx context.Context, chatID int64, chatTitle string
 }
 
 func (c *Client) sendTurn(ctx context.Context, chatID int64, chatTitle, text string, isPrivate bool) (string, error) {
+	// A session poisoned by an earlier failed tool round answers every turn
+	// with nothing until it is rebuilt, so it is repaired before the turn
+	// rather than after it goes wrong again. This no-ops when there is no
+	// session yet, or nothing wrong with it.
+	if err := c.repairSession(ctx, chatID, nil); err != nil {
+		log.Printf("chat %d: %v", chatID, err)
+	}
+
 	chat, err := c.GetChat(ctx, chatID)
 	if err != nil {
 		return "", fmt.Errorf("failed to create new chat: %w", err)
 	}
 
-	if err := c.checkChatHistory(chatID); err != nil {
-		return "", err
-	}
-
 	parts := []*genai.Part{genai.NewPartFromText(text)}
-	result, err := chat.Send(ctx, parts...)
+	result, err := c.sendWithRetry(ctx, chat, chatID, parts...)
 	if err != nil {
 		return "", fmt.Errorf("failed to send message: %w", err)
 	}
@@ -148,24 +165,48 @@ func (c *Client) sendTurn(ctx context.Context, chatID int64, chatTitle, text str
 	// Bound the tool loop. Without this a model that keeps re-calling a failing
 	// tool spins until the API rate-limits it, holding the user's turn open.
 	const maxToolRounds = 8
+	toolRoundsUsed := 0
+	var lastToolResponses []*genai.Part
 	for round := 0; round < maxToolRounds; round++ {
 		functionCalls := result.FunctionCalls()
 		if len(functionCalls) == 0 {
 			break
 		}
+		toolRoundsUsed = round + 1
 
 		// Gemini requires exactly one functionResponse per functionCall in the
 		// turn. Emitting a bare text part for an unknown tool (which is what
 		// this did) leaves the counts mismatched and corrupts the session
-		// history -- which is what checkChatHistory was papering over.
+		// history.
 		response := make([]*genai.Part, 0, len(functionCalls))
 		for _, call := range functionCalls {
 			response = append(response, c.runToolCall(call, chatID, chatTitle, isPrivate))
 		}
 
-		result, err = chat.Send(ctx, response...)
+		// Retrying happens per-exchange, never per-turn, and this is why: the
+		// tool calls above have already run and had their real-world effects
+		// (an event card posted, DMs sent). Replaying the whole turn to
+		// recover from an empty reply would run them a second time. Retrying
+		// only the exchange that came back empty leaves those effects alone.
+		lastToolResponses = response
+		result, err = c.sendWithRetry(ctx, chat, chatID, response...)
 		if err != nil {
 			return "", fmt.Errorf("failed to send function response: %w", err)
+		}
+	}
+
+	if toolRoundsUsed == maxToolRounds && len(result.FunctionCalls()) > 0 {
+		log.Printf("chat %d: gave up after %d tool rounds with the model still calling tools", chatID, maxToolRounds)
+	}
+
+	// The tool ran and its response never made it into the transmitted
+	// history, so put it back before the next turn inherits a malformed
+	// conversation. Doing this here, rather than on the next turn's
+	// defensive pass, means the responses are still in hand and the pair can
+	// be completed instead of discarded.
+	if !hasUsableContent(result) && len(lastToolResponses) > 0 {
+		if err := c.repairSession(ctx, chatID, lastToolResponses); err != nil {
+			log.Printf("chat %d: %v", chatID, err)
 		}
 	}
 
@@ -176,13 +217,140 @@ func (c *Client) sendTurn(ctx context.Context, chatID int64, chatTitle, text str
 	}
 
 	if responseText == "" {
-		if err := c.checkChatHistory(chatID); err != nil {
-			return err.Error(), nil
+		// Everything retriable has already been retried by this point, so
+		// whatever is left is worth saying out loud rather than answering a
+		// direct question with silence.
+		if reason := refusalReason(result); reason != "" {
+			log.Printf("chat %d: model declined to answer (%s)", chatID, reason)
+			return fmt.Sprintf("Não consegui responder isso: %s.", reason), nil
 		}
-		return "", nil
+		log.Printf("chat %d: model returned nothing usable after %d attempts", chatID, maxSendAttempts)
+		return "Não consegui gerar uma resposta agora. Pode tentar de novo?", nil
 	}
 
 	return responseText, nil
+}
+
+// sendWithRetry performs one exchange with the model, retrying when it comes
+// back with nothing usable or fails transiently.
+//
+// Retrying the identical input is safe with respect to the session: on an API
+// error the SDK records no history at all, and on an invalid (empty) response
+// it records the failed turn only in the *comprehensive* history, which is
+// bookkeeping -- the curated history, which is what actually gets transmitted
+// on the next request, never contains it. So a retry re-sends exactly the same
+// conversation the first attempt did.
+func (c *Client) sendWithRetry(ctx context.Context, chat *genai.Chat, chatID int64, parts ...*genai.Part) (*genai.GenerateContentResponse, error) {
+	var lastResult *genai.GenerateContentResponse
+
+	for attempt := 1; attempt <= maxSendAttempts; attempt++ {
+		result, err := chat.Send(ctx, parts...)
+		if err != nil {
+			if attempt < maxSendAttempts && isTransientAPIError(err) {
+				log.Printf("chat %d: transient API error on attempt %d/%d, retrying: %v", chatID, attempt, maxSendAttempts, err)
+				if !sleepOrDone(ctx, sendRetryDelay*time.Duration(attempt)) {
+					return nil, ctx.Err()
+				}
+				continue
+			}
+			return nil, err
+		}
+
+		lastResult = result
+
+		if hasUsableContent(result) {
+			return result, nil
+		}
+
+		// A deliberate refusal is deterministic: asking again spends quota to
+		// be refused again. Hand it back so the caller can say what happened.
+		if refusalReason(result) != "" {
+			return result, nil
+		}
+
+		if attempt < maxSendAttempts {
+			log.Printf("chat %d: empty response on attempt %d/%d (%s), retrying",
+				chatID, attempt, maxSendAttempts, describeEmptyResponse(result))
+			if !sleepOrDone(ctx, sendRetryDelay*time.Duration(attempt)) {
+				return nil, ctx.Err()
+			}
+		} else {
+			log.Printf("chat %d: empty response on final attempt %d/%d (%s)",
+				chatID, attempt, maxSendAttempts, describeEmptyResponse(result))
+		}
+	}
+
+	// Out of attempts. This is not an error: the caller decides what an empty
+	// turn means, and for a tool round it may legitimately be nothing at all.
+	return lastResult, nil
+}
+
+// hasUsableContent reports whether a response carries anything worth acting
+// on: a tool call to run, or text to send.
+//
+// A response can be structurally valid and still useless here. A thinking
+// model that spends its whole output budget on thoughts returns Content whose
+// only parts are marked Thought, and Text() skips those, so it reads as empty.
+// That case and the no-parts-at-all case both warrant the same treatment --
+// ask again -- so they are deliberately not distinguished.
+func hasUsableContent(result *genai.GenerateContentResponse) bool {
+	if result == nil {
+		return false
+	}
+	if len(result.FunctionCalls()) > 0 {
+		return true
+	}
+	return strings.TrimSpace(result.Text()) != ""
+}
+
+// refusalReason explains why the model deliberately declined, or returns ""
+// when it simply failed to produce anything.
+//
+// This is the line between "retry" and "report": a content block is a decision
+// the model will make again given the same input, while an empty response is a
+// coin flip worth re-tossing.
+func refusalReason(result *genai.GenerateContentResponse) string {
+	if result == nil {
+		return ""
+	}
+	if result.PromptFeedback != nil && result.PromptFeedback.BlockReason != "" {
+		return "o pedido foi bloqueado pelo filtro de conteúdo"
+	}
+	if len(result.Candidates) == 0 {
+		return ""
+	}
+	switch result.Candidates[0].FinishReason {
+	case genai.FinishReasonSafety, genai.FinishReasonProhibitedContent,
+		genai.FinishReasonBlocklist, genai.FinishReasonSPII:
+		return "a resposta foi bloqueada pelo filtro de conteúdo"
+	case genai.FinishReasonRecitation:
+		return "a resposta foi bloqueada por citar conteúdo protegido"
+	case genai.FinishReasonMalformedFunctionCall:
+		return "o modelo tentou usar uma ferramenta de um jeito inválido"
+	}
+	return ""
+}
+
+// isTransientAPIError reports whether an API error is worth another attempt:
+// rate limiting and server-side faults are, a malformed request is not.
+func isTransientAPIError(err error) bool {
+	var apiErr genai.APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.Code == 429 || apiErr.Code >= 500
+	}
+	return false
+}
+
+// sleepOrDone waits for d, reporting false if the context was cancelled first.
+func sleepOrDone(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
 }
 
 // runToolCall dispatches one function call and always returns a functionResponse
@@ -221,25 +389,123 @@ func (c *Client) runToolCall(call *genai.FunctionCall, chatID int64, chatTitle s
 	})
 }
 
-func (c *Client) checkChatHistory(chatID int64) error {
+// hasUnansweredToolCall reports whether a history ends with a model turn whose
+// function calls were never answered.
+//
+// This is the shape that quietly bricks a chat. Gemini requires every
+// functionCall to be followed by its functionResponse, and the SDK only adds a
+// turn to the curated history -- the one it actually transmits -- when the
+// model's reply to it was valid. So an empty reply to a functionResponse drops
+// that response from history while leaving the functionCall that provoked it
+// in place. Every later turn then ships a malformed conversation, and the
+// model answers with nothing, every single time, until the session is rebuilt.
+func hasUnansweredToolCall(history []*genai.Content) bool {
+	if len(history) == 0 {
+		return false
+	}
+	last := history[len(history)-1]
+	if last == nil || last.Role != genai.RoleModel {
+		return false
+	}
+	for _, part := range last.Parts {
+		if part != nil && part.FunctionCall != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// repairSession rebuilds a chat whose history ends with an unanswered tool
+// call, so the next turn starts from a conversation the API will accept.
+//
+// pending is the functionResponse we were unable to get answered, when we
+// still have it: replaying it completes the call/response pair and keeps the
+// record that the tool actually ran. Without it there is nothing to pair the
+// call with, so the dangling turn is dropped instead -- losing one exchange,
+// which beats losing the session.
+//
+// Note this repairs rather than resets. The predecessor of this code threw the
+// entire conversation away on any hint of trouble, which did unbrick the chat
+// but cost every earlier message with it.
+func (c *Client) repairSession(ctx context.Context, chatID int64, pending []*genai.Part) error {
 	c.chatsLock.RLock()
 	chat, exists := c.chats[chatID]
 	c.chatsLock.RUnlock()
 	if !exists {
-		return fmt.Errorf("chat with ID %d does not exist", chatID)
+		return nil
 	}
 
-	history := chat.History(false)
-	for _, content := range history {
-		if content != nil && len(content.Parts) > 0 {
-			continue
-		}
-
-		if _, err := c.NewChat(context.Background(), chatID); err != nil {
-			return fmt.Errorf("failed to recover chat session: %w", err)
-		}
-		return fmt.Errorf("Due to a known issue, I failed to generate a response and broke the chat history. I had to start a new session. Please try again.\n\nThe issue: https://discuss.ai.google.dev/t/empty-response-text-from-gemini-2-5-pro-despite-no-safety-and-max-tokens-issues/98010/23")
+	history := chat.History(true)
+	if !hasUnansweredToolCall(history) {
+		return nil
 	}
 
+	repaired := make([]*genai.Content, len(history))
+	copy(repaired, history)
+
+	if len(pending) > 0 {
+		repaired = append(repaired, &genai.Content{Role: genai.RoleUser, Parts: pending})
+		log.Printf("chat %d: completing an unanswered tool call in history", chatID)
+	} else {
+		repaired = repaired[:len(repaired)-1]
+		if len(repaired) > 0 && repaired[len(repaired)-1] != nil && repaired[len(repaired)-1].Role == genai.RoleUser {
+			repaired = repaired[:len(repaired)-1]
+		}
+		log.Printf("chat %d: dropping an unanswered tool call from history", chatID)
+	}
+
+	newChat, err := c.client.Chats.Create(ctx, Model, c.aiConfig, repaired)
+	if err != nil {
+		return fmt.Errorf("failed to rebuild chat session: %w", err)
+	}
+
+	c.chatsLock.Lock()
+	c.chats[chatID] = newChat
+	c.chatsLock.Unlock()
 	return nil
 }
+
+// describeEmptyResponse renders whatever the API told us about a reply that
+// carried nothing usable, so the cause is visible in the log instead of being
+// guessed at.
+func describeEmptyResponse(result *genai.GenerateContentResponse) string {
+	if result == nil {
+		return "no response at all"
+	}
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "candidates=%d", len(result.Candidates))
+	if len(result.Candidates) > 0 && result.Candidates[0] != nil {
+		candidate := result.Candidates[0]
+		fmt.Fprintf(&sb, " finishReason=%q", candidate.FinishReason)
+		if candidate.FinishMessage != "" {
+			fmt.Fprintf(&sb, " finishMessage=%q", candidate.FinishMessage)
+		}
+		if candidate.Content == nil {
+			sb.WriteString(" content=nil")
+		} else {
+			fmt.Fprintf(&sb, " parts=%d", len(candidate.Content.Parts))
+		}
+	}
+	if usage := result.UsageMetadata; usage != nil {
+		fmt.Fprintf(&sb, " tokens(prompt=%d candidates=%d thoughts=%d total=%d)",
+			usage.PromptTokenCount, usage.CandidatesTokenCount, usage.ThoughtsTokenCount, usage.TotalTokenCount)
+	}
+	return sb.String()
+}
+
+// There used to be a checkChatHistory here that scanned chat.History(false)
+// for a Content with no Parts, concluded the session was corrupt, threw the
+// whole session away and told the user "I had to start a new session".
+//
+// It was reading the SDK's own bookkeeping as damage. The genai Chat keeps two
+// histories: the comprehensive one, which deliberately records a failed turn
+// as an empty Content marker, and the curated one, which excludes it. Send
+// transmits the *curated* history, so an empty response never reaches a
+// subsequent request and the session is never actually broken. History(false)
+// asks for the comprehensive one -- so the check fired on healthy sessions,
+// every time the model returned an empty reply, and the "recovery" discarded a
+// conversation that was fine.
+//
+// The empty reply itself is real and worth handling; it is handled where it
+// happens now, by retrying the exchange. See sendWithRetry.
