@@ -46,6 +46,7 @@ const (
 // out to the group looking like a real quote. Anything shaped like our own
 // framing is never something we want to relay.
 var (
+	responseTagRegex  = regexp.MustCompile(`(?i)</?response>`)
 	leakedLineRegex   = regexp.MustCompile(`(?m)^\s*\[\d{4}-\d{2}-\d{2}T[^\]]*\][^\n:]*:\s*.*$`)
 	leakedSuffixRegex = regexp.MustCompile(`\.?\s*The chatID is -?\d+\.?(\s*The chat title is "[^"]*"\.?)?`)
 	systemNoteRegex   = regexp.MustCompile(`(?m)^\s*\[System Note:.*$`)
@@ -54,6 +55,7 @@ var (
 
 // scrubResponse removes any of our own prompt scaffolding the model echoed back.
 func scrubResponse(text string) string {
+	text = responseTagRegex.ReplaceAllString(text, "")
 	text = leakedLineRegex.ReplaceAllString(text, "")
 	text = leakedSuffixRegex.ReplaceAllString(text, "")
 	text = systemNoteRegex.ReplaceAllString(text, "")

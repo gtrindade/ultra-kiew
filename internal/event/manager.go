@@ -119,7 +119,8 @@ type Event struct {
 	// the announcement fires again on every subsequent status change, because
 	// "everybody has responded" stays true once it becomes true -- one tester
 	// changing their answer posted the celebration message a second time.
-	AllRespondedSent bool `json:"all_responded_sent,omitempty"`
+	AllRespondedSent bool      `json:"all_responded_sent,omitempty"`
+	Meet             *MeetInfo `json:"meet,omitempty"`
 }
 
 type Group struct {
@@ -131,6 +132,7 @@ type Manager struct {
 	storage *storage.Client
 	bot     *bot.Bot
 	ai      *googlegenai.Client
+	meet    MeetClient
 }
 
 func (m *Manager) SetBot(b *bot.Bot) {
@@ -139,6 +141,10 @@ func (m *Manager) SetBot(b *bot.Bot) {
 
 func (m *Manager) SetAI(ai *googlegenai.Client) {
 	m.ai = ai
+}
+
+func (m *Manager) SetMeet(meet MeetClient) {
+	m.meet = meet
 }
 
 func NewManager(storageClient *storage.Client) *Manager {
@@ -522,75 +528,100 @@ func (m *Manager) StartEventMonitor(ctx context.Context, checkInterval time.Dura
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			events := make(map[string]Event)
-			m.storage.LoadFromDB(eventsFileName, &events)
+			m.runMonitorTick(ctx)
+		}
+	}
+}
 
-			archivedEvents := make(map[string][]Event)
-			m.storage.LoadFromDB("archived_events.json", &archivedEvents)
+func (m *Manager) runMonitorTick(ctx context.Context) {
+	events := make(map[string]Event)
+	m.storage.LoadFromDB(eventsFileName, &events)
 
-			changed := false
-			now := time.Now().Unix()
+	archivedEvents := make(map[string][]Event)
+	m.storage.LoadFromDB("archived_events.json", &archivedEvents)
 
-			for chatIDStr, ev := range events {
+	changed := false
+	now := time.Now().Unix()
 
-				// 12 hour reminder
-				if ev.Timestamp > 0 && !ev.Reminder12HourSent && ev.Timestamp-now <= 12*60*60 && ev.Timestamp-now > 2*60*60 {
-					durationSeconds := ev.Timestamp - now
-					var whenStr string
-					if durationSeconds >= 11*60*60+55*60 {
-						whenStr = "12 horas"
-					} else {
-						hours := durationSeconds / 3600
-						if hours == 1 {
-							whenStr = "1 hora"
-						} else {
-							whenStr = fmt.Sprintf("%d horas", hours)
-						}
-					}
-
-					m.sendReminder(chatIDStr, ev, whenStr)
-					ev.Reminder12HourSent = true
-					events[chatIDStr] = ev
-					changed = true
-				}
-
-				if ev.Timestamp > 0 && !ev.Reminder1HourSent && ev.Timestamp-now <= 60*60 && ev.Timestamp > now {
-					durationSeconds := ev.Timestamp - now
-					var whenStr string
-					if durationSeconds >= 55*60 {
-						whenStr = "1 hora"
-					} else {
-						minutes := durationSeconds / 60
-						if minutes <= 1 {
-							whenStr = "1 minuto"
-						} else {
-							whenStr = fmt.Sprintf("%d minutos", minutes)
-						}
-					}
-
-					m.sendReminder(chatIDStr, ev, whenStr)
-					ev.Reminder1HourSent = true
-					events[chatIDStr] = ev
-					changed = true
-				}
-
-				if ev.Timestamp > 0 && ev.Timestamp <= now {
-					if !ev.ReminderNowSent {
-						m.sendReminder(chatIDStr, ev, "agora")
-						ev.ReminderNowSent = true
-					}
-					archivedEvents[chatIDStr] = append(archivedEvents[chatIDStr], ev)
-					delete(events, chatIDStr)
-					changed = true
-					log.Printf("Alert: Event '%s' has been deleted/archived for chat %s", ev.Summary, chatIDStr)
-				}
-			}
-
-			if changed {
-				m.storage.SaveToDBAsync("archived_events.json", archivedEvents)
-				m.storage.MustSave(eventsFileName, events)
+	for chatIDStr, ev := range events {
+		if m.meet != nil && ev.Meet == nil {
+			if spaceName, joinURI, err := m.meet.CreateSpace(ctx); err != nil {
+				log.Printf("could not create Meet space for chat %s: %v", chatIDStr, err)
+			} else {
+				ev.Meet = &MeetInfo{SpaceName: spaceName, JoinURI: joinURI}
+				events[chatIDStr] = ev
+				changed = true
+				log.Printf("Alert: Meet space created for event '%s' in chat %s: %s", ev.Summary, chatIDStr, joinURI)
 			}
 		}
+
+		// 12 hour reminder
+		if ev.Timestamp > 0 && !ev.Reminder12HourSent && ev.Timestamp-now <= 12*60*60 && ev.Timestamp-now > 2*60*60 {
+			durationSeconds := ev.Timestamp - now
+			var whenStr string
+			if durationSeconds >= 11*60*60+55*60 {
+				whenStr = "12 horas"
+			} else {
+				hours := durationSeconds / 3600
+				if hours == 1 {
+					whenStr = "1 hora"
+				} else {
+					whenStr = fmt.Sprintf("%d horas", hours)
+				}
+			}
+
+			m.sendReminder(chatIDStr, ev, whenStr)
+			ev.Reminder12HourSent = true
+			events[chatIDStr] = ev
+			changed = true
+		}
+
+		if ev.Timestamp > 0 && !ev.Reminder1HourSent && ev.Timestamp-now <= 60*60 && ev.Timestamp > now {
+			durationSeconds := ev.Timestamp - now
+			var whenStr string
+			if durationSeconds >= 55*60 {
+				whenStr = "1 hora"
+			} else {
+				minutes := durationSeconds / 60
+				if minutes <= 1 {
+					whenStr = "1 minuto"
+				} else {
+					whenStr = fmt.Sprintf("%d minutos", minutes)
+				}
+			}
+
+			m.sendReminder(chatIDStr, ev, whenStr)
+			ev.Reminder1HourSent = true
+			events[chatIDStr] = ev
+			changed = true
+		}
+
+		if ev.Timestamp > 0 && ev.Timestamp <= now {
+			if !ev.ReminderNowSent {
+				m.sendReminder(chatIDStr, ev, "agora")
+				ev.ReminderNowSent = true
+				events[chatIDStr] = ev
+				changed = true
+			}
+
+			updated, finalized, sessionChanged := m.advanceMeetSession(ctx, chatIDStr, ev, now)
+			if sessionChanged {
+				events[chatIDStr] = updated
+				ev = updated
+				changed = true
+			}
+			if finalized {
+				archivedEvents[chatIDStr] = append(archivedEvents[chatIDStr], updated)
+				delete(events, chatIDStr)
+				changed = true
+				log.Printf("Alert: Event '%s' has been deleted/archived for chat %s", updated.Summary, chatIDStr)
+			}
+		}
+	}
+
+	if changed {
+		m.storage.SaveToDBAsync("archived_events.json", archivedEvents)
+		m.storage.MustSave(eventsFileName, events)
 	}
 }
 

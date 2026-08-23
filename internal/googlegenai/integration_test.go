@@ -41,7 +41,7 @@ func TestIntegration_EventAI(t *testing.T) {
 	
 	// Pre-seed groups.json so the event creation allows it
 	groups := map[string]event.Group{
-		"12345": {Users: []string{"@alice", "@bob", "@guilhermetmg"}},
+		"-12345": {Users: []string{"@alice", "@bob", "@guilhermetmg"}},
 	}
 	storageClient.SaveToDBAsync("groups.json", groups)
 	time.Sleep(50 * time.Millisecond)
@@ -68,7 +68,7 @@ func TestIntegration_EventAI(t *testing.T) {
 
 	// 1. Ask AI to schedule an event for 21:00 (without timezone)
 	// It should respond asking for the timezone!
-	chatID := int64(12345)
+	chatID := int64(-12345)
 	
 	resp1, err := aiClient.SendMessage(ctx, chatID, "Test Group", "cria um evento as 21:00")
 	if err != nil {

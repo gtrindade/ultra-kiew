@@ -25,13 +25,17 @@ import (
 // produce a string, and can never be steered by the chat it is about to be
 // posted into.
 func (c *Client) GenerateText(ctx context.Context, instruction string) (string, error) {
+	return c.GenerateTextWithModel(ctx, Model, instruction)
+}
+
+func (c *Client) GenerateTextWithModel(ctx context.Context, model, instruction string) (string, error) {
 	config := &genai.GenerateContentConfig{
 		SystemInstruction: &genai.Content{
 			Parts: []*genai.Part{
 				genai.NewPartFromText(fmt.Sprintf(
 					`You are %q, a bot in a Brazilian tabletop RPG group chat. You write short, fun messages in Brazilian Portuguese (pt-BR).
 
-You are being asked for ONE message. Output only the message text itself, as raw text that goes straight to Telegram: no quotes around it, no markdown fences, no preamble, no explanation of what you wrote, and never a "[timestamp - user]:" prefix.`,
+You are being asked for ONE message. Output only the message text itself, as raw text that goes straight to Telegram: no quotes around it, no markdown fences, no preamble, no explanation of what you wrote, no <response> tags, and never a "[timestamp - user]:" prefix.`,
 					c.config.BotName)),
 			},
 		},
@@ -39,7 +43,7 @@ You are being asked for ONE message. Output only the message text itself, as raw
 
 	result, err := c.client.Models.GenerateContent(
 		ctx,
-		Model,
+		model,
 		[]*genai.Content{genai.NewContentFromText(instruction, genai.RoleUser)},
 		config,
 	)
