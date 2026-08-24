@@ -65,6 +65,16 @@ type Authenticator struct {
 	clientSecret string
 	tokenPath    string
 
+	// NonInteractive stops AccessToken from ever falling back to the browser
+	// consent flow, returning a plain error instead. The bot sets this: it
+	// calls AccessToken from the event monitor's ticker goroutine, and a
+	// consent flow that can never complete on a headless box would otherwise
+	// block that goroutine for up to 5 minutes per attempt -- stalling event
+	// reminders for every chat, not just the one that wanted a Meet link,
+	// once every tick, indefinitely. cmd/meetspike leaves this false, since it
+	// is a one-shot interactive tool where blocking for consent is the point.
+	NonInteractive bool
+
 	lock sync.Mutex
 	tok  *token
 }
@@ -170,22 +180,51 @@ func (a *Authenticator) AccessToken(ctx context.Context) (string, error) {
 	a.lock.Lock()
 	defer a.lock.Unlock()
 
-	if a.tok.valid() {
+	if err := a.ensureFreshTokenLocked(ctx); err == nil {
 		return a.tok.AccessToken, nil
-	}
-
-	if a.tok != nil && a.tok.RefreshToken != "" {
-		if err := a.refresh(ctx); err != nil {
-			fmt.Printf("google: token refresh failed (%v), falling back to interactive consent\n", err)
-		} else {
-			return a.tok.AccessToken, nil
-		}
+	} else if a.NonInteractive {
+		return "", err
 	}
 
 	if err := a.consent(ctx); err != nil {
 		return "", err
 	}
 	return a.tok.AccessToken, nil
+}
+
+// CheckToken reports whether a usable token is available right now, without
+// ever opening a browser -- refreshing if that is possible, but nothing more.
+//
+// This exists so a caller can find out at startup, in one clear log line,
+// exactly why Meet integration will not work: no token file has ever been
+// created, or the one on disk has no refresh token, or the refresh token has
+// been revoked. All three currently surface identically -- as CreateSpace
+// quietly failing once a minute inside the event monitor -- which is exactly
+// the class of problem worth catching before the first event ever needs it.
+func (a *Authenticator) CheckToken(ctx context.Context) error {
+	a.lock.Lock()
+	defer a.lock.Unlock()
+	return a.ensureFreshTokenLocked(ctx)
+}
+
+// ensureFreshTokenLocked makes a.tok valid without ever consenting, or
+// explains why it could not. Callers must hold a.lock.
+func (a *Authenticator) ensureFreshTokenLocked(ctx context.Context) error {
+	if a.tok.valid() {
+		return nil
+	}
+
+	if a.tok == nil {
+		return fmt.Errorf("no cached token at %s -- run interactive consent once (e.g. with cmd/meetspike) and copy the resulting file here, or point token_file at one that already exists", a.tokenPath)
+	}
+	if a.tok.RefreshToken == "" {
+		return fmt.Errorf("the token cached at %s has no refresh token (consent may have been granted without offline access) -- redo consent", a.tokenPath)
+	}
+
+	if err := a.refresh(ctx); err != nil {
+		return fmt.Errorf("refresh token at %s is no longer valid (%w) -- it may have been revoked; redo consent", a.tokenPath, err)
+	}
+	return nil
 }
 
 func (a *Authenticator) refresh(ctx context.Context) error {
