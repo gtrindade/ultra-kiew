@@ -308,6 +308,73 @@ func TestAppendMeetLinkLeavesTextUnchangedWithNoMeet(t *testing.T) {
 	}
 }
 
+// The exact bug reported in production: one player confirmed, one running 10
+// minutes late, nobody absent. This used to get the same "sessão está
+// comprometida" roast as an outright no-show, because the only signal
+// available was "is everyone exactly 💪". It must now pick the light,
+// proportionate tone, and its (deterministic, network-free) fallback text
+// must actually name the late player rather than reading as generic doom.
+func TestBuildAnnouncementIsProportionateForALateArrivalWithNoAbsences(t *testing.T) {
+	groupUsers := []string{"@guilhermetmg", "@guikiew"}
+	confirmations := map[string]string{
+		"@guilhermetmg": "🐢 (10 min)",
+		"@guikiew":      "💪",
+	}
+
+	a := buildAnnouncement("Test Ultra-Kiew", groupUsers, confirmations)
+
+	if !strings.Contains(a.fallback, "@guilhermetmg") {
+		t.Errorf("expected the fallback to name the late player, got %q", a.fallback)
+	}
+	if !strings.Contains(a.fallback, "(10 min)") {
+		t.Errorf("expected the fallback to include the late duration, got %q", a.fallback)
+	}
+	for _, doomWord := range []string{"comprometida", "falha crítica", "morto"} {
+		if strings.Contains(strings.ToLower(a.fallback), strings.ToLower(doomWord)) {
+			t.Errorf("fallback reads like the old no-show panic (contains %q): %q", doomWord, a.fallback)
+		}
+	}
+	if len(a.namesToVerify) != 1 || a.namesToVerify[0] != "@guilhermetmg" {
+		t.Errorf("expected exactly the late player to require verification, got %v", a.namesToVerify)
+	}
+}
+
+// A real no-show must still get the sharper tone, and must name specifically
+// who bailed, not the group as a whole.
+func TestBuildAnnouncementRoastsOnlyTheNoShow(t *testing.T) {
+	groupUsers := []string{"@alice", "@bob", "@carol"}
+	confirmations := map[string]string{
+		"@alice": "💪",
+		"@bob":   "🐔",
+		"@carol": "🐢 (5 min)",
+	}
+
+	a := buildAnnouncement("Test Ultra-Kiew", groupUsers, confirmations)
+
+	if !strings.Contains(a.fallback, "@bob") {
+		t.Errorf("expected the fallback to name the no-show, got %q", a.fallback)
+	}
+	if len(a.namesToVerify) != 1 || a.namesToVerify[0] != "@bob" {
+		t.Errorf("expected only the no-show to require verification, not the late player, got %v", a.namesToVerify)
+	}
+}
+
+// Everyone confirmed on time: the hype path, unchanged, with nothing to
+// specifically verify.
+func TestBuildAnnouncementCelebratesWhenEveryoneIsOnTime(t *testing.T) {
+	groupUsers := []string{"@alice", "@bob"}
+	confirmations := map[string]string{"@alice": "💪", "@bob": "💪"}
+
+	a := buildAnnouncement("Test Ultra-Kiew", groupUsers, confirmations)
+
+	if len(a.namesToVerify) != 0 {
+		t.Errorf("expected nothing to verify when everyone is on time, got %v", a.namesToVerify)
+	}
+	if !strings.Contains(a.fallback, "Todos confirmados") {
+		t.Errorf("expected the hype fallback, got %q", a.fallback)
+	}
+}
+
 func mustLoad(t *testing.T, name string) *time.Location {
 	t.Helper()
 	loc, err := time.LoadLocation(name)

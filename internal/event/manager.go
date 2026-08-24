@@ -428,14 +428,10 @@ func (m *Manager) updateStatus(args map[string]any, callerChatID int64, isPrivat
 	}
 
 	allResponded := true
-	allYes := true
 	for _, u := range groupUsers {
 		conf, hasConf := event.Confirmations[u]
 		if !hasConf || conf == "❔" {
 			allResponded = false
-		}
-		if conf != "💪" {
-			allYes = false
 		}
 	}
 
@@ -455,7 +451,7 @@ func (m *Manager) updateStatus(args map[string]any, callerChatID int64, isPrivat
 		})
 
 		if announce {
-			m.sendAllRespondedAnnouncement(groupChatID, event, allYes)
+			m.sendAllRespondedAnnouncement(groupChatID, event, groupUsers)
 		}
 	}
 
@@ -474,17 +470,123 @@ func renderEventText(summary, date string, users []string, confirmations map[str
 	return text
 }
 
-func (m *Manager) sendAllRespondedAnnouncement(groupChatID int64, event Event, allYes bool) {
-	var prompt, fallback string
-	if allYes {
-		prompt = fmt.Sprintf("Gere uma mensagem animada e nerd avisando o grupo que TODO MUNDO CONFIRMOU presença na sessão de RPG %q. Seja criativo, faça referências a acertos críticos ou rolagens de dados.", event.Summary)
-		fallback = "Todos confirmados! Preparem-se para uma sessão de RPG épica e cheia de acertos e falhas críticas! 🎲🐉"
-	} else {
-		prompt = fmt.Sprintf("Gere uma mensagem engraçada zoando porque alguém furou a sessão de RPG %q. Faça referências a testes de resistência falhos ou falta de compromisso.", event.Summary)
-		fallback = "Parece que alguém falhou no teste de compromisso. Sempre tem um... 🐔🐢"
+// lateSuffix pulls the "(10 min)" part off a late confirmation, if the user
+// gave one, e.g. "🐢 (10 min)" -> "(10 min)". Returns "" for a bare "🐢".
+func lateSuffix(conf string) string {
+	start := strings.Index(conf, "(")
+	if start == -1 {
+		return ""
+	}
+	return conf[start:]
+}
+
+// joinOrNenhum renders a name list for the prompt, since an empty Go slice
+// printed with %v reads as "[]" -- not obviously "nobody" to a model that has
+// no other signal to go on.
+func joinOrNenhum(names []string) string {
+	if len(names) == 0 {
+		return "ninguém"
+	}
+	return strings.Join(names, ", ")
+}
+
+// announcement is what buildAnnouncement decides, and everything
+// sendAllRespondedAnnouncement needs to act on that decision.
+type announcement struct {
+	prompt        string
+	fallback      string
+	namesToVerify []string // must all appear in the generated text, or fall back
+}
+
+// buildAnnouncement classifies every invited user into confirmed / late /
+// absent from their emoji confirmation, and picks one of three tones -- not
+// two. Everyone-in and a full no-show were always distinct, but late arrivals
+// used to collapse into the same "someone bailed, sessão comprometida" bucket
+// as an outright no-show, because the only signal available was "is everyone
+// exactly 💪". A player running 10 minutes late would get the same doom-laden
+// roast as one who said they are not coming at all.
+//
+// The model is always handed the literal roster, rather than a bare
+// yes/no/late signal, because that vagueness -- not tone -- was the actual
+// bug: with nothing specific to reference, the model filled in generic,
+// disproportionate drama on its own.
+//
+// This is pure and separate from sendAllRespondedAnnouncement precisely so the
+// classification and tone-selection can be tested directly, without a bot
+// double -- the previous behavior here (the same over-the-top message for a
+// 10-minute delay as for a no-show) is exactly the kind of thing that should
+// fail a test if it comes back.
+func buildAnnouncement(summary string, groupUsers []string, confirmations map[string]string) announcement {
+	var confirmed, late, absent []string
+	for _, u := range groupUsers {
+		conf := confirmations[u]
+		switch {
+		case conf == "💪":
+			confirmed = append(confirmed, u)
+		case strings.HasPrefix(conf, "🐢"):
+			if suffix := lateSuffix(conf); suffix != "" {
+				late = append(late, fmt.Sprintf("%s %s", u, suffix))
+			} else {
+				late = append(late, u)
+			}
+		case conf == "🐔":
+			absent = append(absent, u)
+		}
 	}
 
-	text := m.generateOrFallback(prompt, fallback)
+	roster := fmt.Sprintf("Confirmados no horário: %s\nAtrasados: %s\nNão vão: %s",
+		joinOrNenhum(confirmed), joinOrNenhum(late), joinOrNenhum(absent))
+
+	var a announcement
+	switch {
+	case len(absent) == 0 && len(late) == 0:
+		a.prompt = fmt.Sprintf("Gere uma mensagem animada e nerd avisando o grupo que TODO MUNDO CONFIRMOU presença na sessão de RPG %q, no horário. Seja criativo, faça referências a acertos críticos ou rolagens de dados.\n\n%s", summary, roster)
+		a.fallback = fmt.Sprintf("Todos confirmados para %q! Preparem-se para uma sessão de RPG épica e cheia de acertos e falhas críticas! 🎲🐉", summary)
+
+	case len(absent) == 0:
+		// Nobody bailed -- only late arrivals. This is the case that used to
+		// get the same treatment as a no-show; it should read as a light,
+		// specific jab, not a crisis.
+		a.prompt = fmt.Sprintf(`Gere uma mensagem curta e bem-humorada sobre a sessão de RPG %q. NINGUÉM faltou -- todo mundo confirmou, só que algumas pessoas vão chegar atrasadas. Seja leve e proporcional: poucos minutos de atraso NÃO é motivo de drama nem ameaça à sessão, é só uma cutucada gostosa citando o nome de quem está atrasado e, se souber, quanto tempo. Não trate isso como se a sessão estivesse comprometida.
+
+Baseie-se EXATAMENTE nesta lista, sem inventar nomes nem tempos:
+%s`, summary, roster)
+		a.fallback = fmt.Sprintf("Quase todo mundo pronto para %q!\n%s", summary, roster)
+		for _, l := range late {
+			a.namesToVerify = append(a.namesToVerify, strings.Fields(l)[0])
+		}
+
+	default:
+		a.prompt = fmt.Sprintf(`Gere uma mensagem engraçada zoando especificamente quem confirmou que NÃO vai à sessão de RPG %q -- cite os nomes de quem faltou. Se alguém só está atrasado (não ausente), não zoe essa pessoa com o mesmo peso; reserve o deboche mais pesado para quem realmente não vai.
+
+Baseie-se EXATAMENTE nesta lista, sem inventar nomes:
+%s`, summary, roster)
+		a.fallback = fmt.Sprintf("Nem todo mundo vai poder para %q.\n%s", summary, roster)
+		a.namesToVerify = absent
+	}
+
+	return a
+}
+
+// sendAllRespondedAnnouncement fires once, when every invited user has
+// answered.
+func (m *Manager) sendAllRespondedAnnouncement(groupChatID int64, event Event, groupUsers []string) {
+	a := buildAnnouncement(event.Summary, groupUsers, event.Confirmations)
+
+	text := m.generateOrFallback(a.prompt, a.fallback)
+
+	// Whichever names matter for this tone -- who bailed, in the roast case;
+	// who is late, in the light-jab case -- must actually be named, or the
+	// specific dig the prompt asked for did not happen. Same reasoning as the
+	// tag check in sendReminder: verify the one concrete thing the message
+	// exists to do, rather than trust a paraphrase-prone model to always do it.
+	for _, name := range a.namesToVerify {
+		if !strings.Contains(text, name) {
+			log.Printf("all-responded announcement dropped a name (%s), using fallback", name)
+			text = a.fallback
+			break
+		}
+	}
 
 	params := &bot.SendMessageParams{ChatID: groupChatID, Text: text}
 	if event.MessageID != 0 {
