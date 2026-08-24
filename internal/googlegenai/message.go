@@ -39,7 +39,15 @@ const (
 // the empty completion, because it is a different model. This is that
 // workaround, used only as a last resort since it costs more per call than
 // Model.
-const FallbackModel = "gemini-2.5-flash"
+//
+// Was gemini-2.5-flash, which the API then started rejecting outright with
+// "no longer available to new users" -- while still listing it as available
+// from ListModels. That mismatch is the operative lesson: a model's presence
+// in the catalog does not mean generateContent will actually accept it for
+// this account, so don't trust ListModels to pick a replacement -- pick the
+// one the rejection error itself names, which for that specific 404 was
+// gemini-3.6-flash.
+const FallbackModel = "gemini-3.6-flash"
 
 // Keys injected into every tool call by the code. The model can also emit keys
 // with these names -- we always overwrite them after the model's args are read,

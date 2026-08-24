@@ -17,7 +17,14 @@ import (
 
 const (
 	// Model is the default model used for generating content.
-	Model = "gemini-2.5-flash-lite"
+	//
+	// Was gemini-2.5-flash-lite. Moved off the whole 2.5 generation because the
+	// deterministic-empty-completion bug this bot works around (see
+	// FallbackModel in message.go) is specifically reported against 2.5-series
+	// models; a newer generation is the more direct fix for "happens too
+	// often", not just a retry target. gemini-3.1-flash-lite is the same cost
+	// tier, one generation newer.
+	Model = "gemini-3.1-flash-lite"
 
 	// UPLOAD_ENABLED indicates whether file upload is enabled.
 	UPLOAD_ENABLED = false
