@@ -80,8 +80,8 @@ func TestAdvanceMeetSessionStaysLiveWhileRecordIsOpen(t *testing.T) {
 	if !changed {
 		t.Fatal("expected the new conference record to be persisted")
 	}
-	if len(updated.Meet.ConferenceRecords) != 1 {
-		t.Fatalf("expected 1 conference record recorded, got %v", updated.Meet.ConferenceRecords)
+	if len(updated.Meet.Segments) != 1 {
+		t.Fatalf("expected 1 segment recorded, got %v", updated.Meet.Segments)
 	}
 }
 
@@ -134,12 +134,12 @@ func TestAdvanceMeetSessionFinalizesAfterGracePeriodWithNoRecap(t *testing.T) {
 	if !updated.Meet.RecapPosted {
 		t.Fatal("expected RecapPosted to be set")
 	}
-	if len(updated.Meet.TranscriptLinks) != 1 {
-		t.Fatalf("expected the transcript link to be recorded, got %v", updated.Meet.TranscriptLinks)
+	if len(updated.Meet.Segments) != 1 || len(updated.Meet.Segments[0].TranscriptLinks) != 1 {
+		t.Fatalf("expected the transcript link to be recorded, got %+v", updated.Meet.Segments)
 	}
 }
 
-// If nobody ever joins, ConferenceRecords stays empty forever -- this must
+// If nobody ever joins, Segments stays empty forever -- this must
 // still finalize eventually rather than tracking the event indefinitely.
 func TestAdvanceMeetSessionFinalizesOnNoShow(t *testing.T) {
 	fm := &fakeMeet{records: nil}
@@ -171,7 +171,7 @@ func TestAdvanceMeetSessionHitsHardCap(t *testing.T) {
 	ev := Event{
 		Summary:   "Sessão de teste",
 		Timestamp: time.Now().Add(-(meetMaxSessionLength + time.Minute)).Unix(),
-		Meet:      &MeetInfo{SpaceName: "spaces/xyz", ConferenceRecords: []string{recordName}},
+		Meet:      &MeetInfo{SpaceName: "spaces/xyz", Segments: []MeetSegment{{RecordName: recordName}}},
 	}
 	now := time.Now().Unix()
 
@@ -198,10 +198,10 @@ func TestAdvanceMeetSessionPacesArtifactChecksRatherThanPollingEveryTick(t *test
 	ev := Event{
 		Summary: "Sessão longa",
 		Meet: &MeetInfo{
-			SpaceName:         "spaces/xyz",
-			ConferenceRecords: []string{"conferenceRecords/abc"},
-			SessionEnded:      true,
-			SessionEndedAt:    now - 60, // ended a minute ago
+			SpaceName:      "spaces/xyz",
+			Segments:       []MeetSegment{{RecordName: "conferenceRecords/abc"}},
+			SessionEnded:   true,
+			SessionEndedAt: now - 60, // ended a minute ago
 		},
 	}
 
@@ -249,10 +249,10 @@ func TestAdvanceMeetSessionWaitsForArtifactsBeforeGivingUp(t *testing.T) {
 	ev := Event{
 		Summary: "Sessão de teste",
 		Meet: &MeetInfo{
-			SpaceName:         "spaces/xyz",
-			ConferenceRecords: []string{"conferenceRecords/abc"},
-			SessionEnded:      true,
-			SessionEndedAt:    now - int64((meetArtifactMaxWait - time.Minute).Seconds()),
+			SpaceName:      "spaces/xyz",
+			Segments:       []MeetSegment{{RecordName: "conferenceRecords/abc"}},
+			SessionEnded:   true,
+			SessionEndedAt: now - int64((meetArtifactMaxWait - time.Minute).Seconds()),
 		},
 	}
 
@@ -276,10 +276,10 @@ func TestAdvanceMeetSessionGivesUpWaitingForArtifacts(t *testing.T) {
 	ev := Event{
 		Summary: "Sessão de teste",
 		Meet: &MeetInfo{
-			SpaceName:         "spaces/xyz",
-			ConferenceRecords: []string{"conferenceRecords/abc"},
-			SessionEnded:      true,
-			SessionEndedAt:    now - int64((meetArtifactMaxWait + time.Minute).Seconds()),
+			SpaceName:      "spaces/xyz",
+			Segments:       []MeetSegment{{RecordName: "conferenceRecords/abc"}},
+			SessionEnded:   true,
+			SessionEndedAt: now - int64((meetArtifactMaxWait + time.Minute).Seconds()),
 		},
 	}
 
@@ -402,5 +402,61 @@ func TestDedupeMeetLinksKeepsGenuinelyDifferentDocs(t *testing.T) {
 
 	if len(got) != 2 {
 		t.Fatalf("expected both distinct links to survive, got %d: %v", len(got), got)
+	}
+}
+
+// This is the label that lets a reader tell a several-second Meet
+// language-switch artifact apart from the real multi-hour session without
+// opening either link -- the whole point of the feature.
+func TestFormatSegmentDuration(t *testing.T) {
+	start := time.Date(2026, 8, 23, 20, 0, 0, 0, time.UTC)
+
+	cases := []struct {
+		name string
+		end  time.Time
+		want string
+	}{
+		{"a few seconds (the language-switch artifact)", start.Add(45 * time.Second), "45s"},
+		{"under a minute, rounds down", start.Add(59 * time.Second), "59s"},
+		{"a few minutes", start.Add(12 * time.Minute), "12min"},
+		{"just under an hour", start.Add(59 * time.Minute), "59min"},
+		{"exactly one hour", start.Add(1 * time.Hour), "1h"},
+		{"hours with leftover minutes", start.Add(3*time.Hour + 58*time.Minute), "3h58min"},
+		{"a long session", start.Add(6 * time.Hour), "6h"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := formatSegmentDuration(start.Format(time.RFC3339), tc.end.Format(time.RFC3339))
+			if got != tc.want {
+				t.Errorf("formatSegmentDuration(%s -> %s) = %q, want %q", start, tc.end, got, tc.want)
+			}
+		})
+	}
+}
+
+// Malformed or missing timestamps must degrade to no label, not a wrong one
+// or a crash -- this can legitimately happen if a segment reaches the recap
+// somehow without a resolved end time.
+func TestFormatSegmentDurationDegradesGracefullyOnBadInput(t *testing.T) {
+	validStart := time.Now().Format(time.RFC3339)
+
+	cases := []struct {
+		name  string
+		start string
+		end   string
+	}{
+		{"empty end time", validStart, ""},
+		{"empty start time", "", validStart},
+		{"garbage end time", validStart, "not-a-timestamp"},
+		{"end before start", validStart, time.Now().Add(-time.Hour).Format(time.RFC3339)},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := formatSegmentDuration(tc.start, tc.end); got != "" {
+				t.Errorf("expected empty string for bad input, got %q", got)
+			}
+		})
 	}
 }
