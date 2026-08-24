@@ -228,8 +228,10 @@ func (m *Manager) postMeetRecap(chatIDStr string, ev Event, meetInfo MeetInfo) {
 		return
 	}
 
+	hasLinks := len(meetInfo.TranscriptLinks) > 0 || len(meetInfo.SmartNotesLinks) > 0
+
 	var text string
-	if len(meetInfo.TranscriptLinks) == 0 && len(meetInfo.SmartNotesLinks) == 0 {
+	if !hasLinks {
 		text = fmt.Sprintf("A sessão %q terminou, mas não encontrei transcrição ou anotações geradas para ela.", ev.Summary)
 	} else {
 		text = fmt.Sprintf("A sessão %q terminou! Aqui está o material da call:\n", ev.Summary)
@@ -243,6 +245,11 @@ func (m *Manager) postMeetRecap(chatIDStr string, ev Event, meetInfo MeetInfo) {
 	}
 
 	params := &bot.SendMessageParams{ChatID: chatID, Text: text}
+	if hasLinks {
+		// Same reasoning as the Meet join link in reminders: Telegram's
+		// preview for a Drive doc link is generic and adds nothing here.
+		params.LinkPreviewOptions = &models.LinkPreviewOptions{IsDisabled: bot.True()}
+	}
 	if ev.MessageID != 0 {
 		params.ReplyParameters = &models.ReplyParameters{MessageID: ev.MessageID}
 	}

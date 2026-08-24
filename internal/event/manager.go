@@ -783,6 +783,7 @@ func (m *Manager) sendReminder(chatIDStr string, ev Event, when string) {
 		}
 	}
 
+	hasMeetLink := ev.Meet != nil && ev.Meet.JoinURI != ""
 	text = appendMeetLink(text, ev.Meet)
 
 	log.Printf("Alert: Reminder sent for event '%s' (%s) to chat %s", ev.Summary, timeMsg, chatIDStr)
@@ -790,6 +791,12 @@ func (m *Manager) sendReminder(chatIDStr string, ev Event, when string) {
 	params := &bot.SendMessageParams{
 		ChatID: chatID,
 		Text:   text,
+	}
+	if hasMeetLink {
+		// Telegram's preview for a Meet link is a generic "Google Meet" card
+		// with no useful information -- just visual noise ahead of the actual
+		// reminder text.
+		params.LinkPreviewOptions = &models.LinkPreviewOptions{IsDisabled: bot.True()}
 	}
 	if ev.MessageID != 0 {
 		params.ReplyParameters = &models.ReplyParameters{MessageID: ev.MessageID}
