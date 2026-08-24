@@ -16,14 +16,30 @@ const MaxFunctionResponseLength = 10000
 
 // Retry policy for a single exchange with the model.
 //
-// An empty reply from Gemini is a known transient fault, not an answer: the
-// model hands back a candidate with nothing usable in it, most often right
-// after a tool round. Asking again with the identical input usually just
-// works, so it is retried here instead of being reported to the user.
+// An empty reply from Gemini is usually a transient fault: the model hands
+// back a candidate with nothing usable in it, most often right after a tool
+// round, and asking again with the identical input works. But not always --
+// see FallbackModel below for the case where it does not.
 const (
 	maxSendAttempts = 3
 	sendRetryDelay  = 700 * time.Millisecond
 )
+
+// FallbackModel is tried once, after every attempt on Model has come back
+// with an empty completion.
+//
+// This exists for a specific, observed shape of failure that retrying the
+// same model cannot fix: a request that gets finishReason STOP with zero
+// candidate tokens, byte-for-byte identical across every retry -- meaning the
+// model is not flaky on this input, it is deterministically wrong for it. This
+// is a known issue with no acknowledged root cause:
+// https://discuss.ai.google.dev/t/empty-response-text-from-gemini-2-5-pro-despite-no-safety-and-max-tokens-issues/98010/23
+// Community reports agree on one workaround: a different model asked the exact
+// same question usually does not reproduce whatever degenerate state produced
+// the empty completion, because it is a different model. This is that
+// workaround, used only as a last resort since it costs more per call than
+// Model.
+const FallbackModel = "gemini-2.5-flash"
 
 // Keys injected into every tool call by the code. The model can also emit keys
 // with these names -- we always overwrite them after the model's args are read,
@@ -119,7 +135,7 @@ func (c *Client) SendMessageWithParts(ctx context.Context, chatID int64, parts [
 	if err != nil {
 		return "", fmt.Errorf("failed to create new chat: %w", err)
 	}
-	result, err := c.sendWithRetry(ctx, chat, chatID, parts...)
+	result, _, err := c.sendWithRetry(ctx, chat, chatID, parts...)
 	if err != nil {
 		return "", err
 	}
@@ -159,7 +175,7 @@ func (c *Client) sendTurn(ctx context.Context, chatID int64, chatTitle, text str
 	}
 
 	parts := []*genai.Part{genai.NewPartFromText(text)}
-	result, err := c.sendWithRetry(ctx, chat, chatID, parts...)
+	result, chat, err := c.sendWithRetry(ctx, chat, chatID, parts...)
 	if err != nil {
 		return "", fmt.Errorf("failed to send message: %w", err)
 	}
@@ -191,7 +207,7 @@ func (c *Client) sendTurn(ctx context.Context, chatID int64, chatTitle, text str
 		// recover from an empty reply would run them a second time. Retrying
 		// only the exchange that came back empty leaves those effects alone.
 		lastToolResponses = response
-		result, err = c.sendWithRetry(ctx, chat, chatID, response...)
+		result, chat, err = c.sendWithRetry(ctx, chat, chatID, response...)
 		if err != nil {
 			return "", fmt.Errorf("failed to send function response: %w", err)
 		}
@@ -242,7 +258,15 @@ func (c *Client) sendTurn(ctx context.Context, chatID int64, chatTitle, text str
 // bookkeeping -- the curated history, which is what actually gets transmitted
 // on the next request, never contains it. So a retry re-sends exactly the same
 // conversation the first attempt did.
-func (c *Client) sendWithRetry(ctx context.Context, chat *genai.Chat, chatID int64, parts ...*genai.Part) (*genai.GenerateContentResponse, error) {
+// sendWithRetry performs one exchange with the model, retrying when it comes
+// back with nothing usable or fails transiently, and falling back to a
+// different model as a last resort. It returns the chat the caller should use
+// from here on: ordinarily the same one passed in, but a new *genai.Chat when
+// the fallback path had to splice a different model's answer into a rebuilt
+// session (see sendWithFallbackModel). Every caller must keep using whatever
+// chat comes back, not the one it passed in, or a later turn in the same
+// exchange would diverge from what is actually stored in c.chats.
+func (c *Client) sendWithRetry(ctx context.Context, chat *genai.Chat, chatID int64, parts ...*genai.Part) (*genai.GenerateContentResponse, *genai.Chat, error) {
 	var lastResult *genai.GenerateContentResponse
 
 	for attempt := 1; attempt <= maxSendAttempts; attempt++ {
@@ -251,30 +275,30 @@ func (c *Client) sendWithRetry(ctx context.Context, chat *genai.Chat, chatID int
 			if attempt < maxSendAttempts && isTransientAPIError(err) {
 				log.Printf("chat %d: transient API error on attempt %d/%d, retrying: %v", chatID, attempt, maxSendAttempts, err)
 				if !sleepOrDone(ctx, sendRetryDelay*time.Duration(attempt)) {
-					return nil, ctx.Err()
+					return nil, chat, ctx.Err()
 				}
 				continue
 			}
-			return nil, err
+			return nil, chat, err
 		}
 
 		lastResult = result
 
 		if hasUsableContent(result) {
-			return result, nil
+			return result, chat, nil
 		}
 
 		// A deliberate refusal is deterministic: asking again spends quota to
 		// be refused again. Hand it back so the caller can say what happened.
 		if refusalReason(result) != "" {
-			return result, nil
+			return result, chat, nil
 		}
 
 		if attempt < maxSendAttempts {
 			log.Printf("chat %d: empty response on attempt %d/%d (%s), retrying",
 				chatID, attempt, maxSendAttempts, describeEmptyResponse(result))
 			if !sleepOrDone(ctx, sendRetryDelay*time.Duration(attempt)) {
-				return nil, ctx.Err()
+				return nil, chat, ctx.Err()
 			}
 		} else {
 			log.Printf("chat %d: empty response on final attempt %d/%d (%s)",
@@ -282,9 +306,55 @@ func (c *Client) sendWithRetry(ctx context.Context, chat *genai.Chat, chatID int
 		}
 	}
 
-	// Out of attempts. This is not an error: the caller decides what an empty
-	// turn means, and for a tool round it may legitimately be nothing at all.
-	return lastResult, nil
+	if fallbackResult, fallbackChat, err := c.sendWithFallbackModel(ctx, chat, chatID, parts...); err != nil {
+		log.Printf("chat %d: fallback model attempt failed: %v", chatID, err)
+	} else if hasUsableContent(fallbackResult) {
+		log.Printf("chat %d: %s produced a usable response after %s returned only empty ones", chatID, FallbackModel, Model)
+		return fallbackResult, fallbackChat, nil
+	}
+
+	// Out of attempts, fallback included. This is not an error: the caller
+	// decides what an empty turn means, and for a tool round it may
+	// legitimately be nothing at all.
+	return lastResult, chat, nil
+}
+
+// sendWithFallbackModel re-asks the exact same question on FallbackModel, over
+// the same curated history, and -- only if that produces something usable --
+// splices the exchange into a freshly built session on Model so later turns
+// carry it forward on the cheaper model. A failed or still-empty attempt
+// leaves the original chat and its history completely untouched.
+func (c *Client) sendWithFallbackModel(ctx context.Context, chat *genai.Chat, chatID int64, parts ...*genai.Part) (*genai.GenerateContentResponse, *genai.Chat, error) {
+	log.Printf("chat %d: %s produced only empty responses, trying %s instead", chatID, Model, FallbackModel)
+
+	history := chat.History(true)
+	inputContent := &genai.Content{Role: genai.RoleUser, Parts: parts}
+	contents := append(append([]*genai.Content{}, history...), inputContent)
+
+	result, err := c.client.Models.GenerateContent(ctx, FallbackModel, contents, c.aiConfig)
+	if err != nil {
+		return nil, chat, err
+	}
+	if !hasUsableContent(result) {
+		return result, chat, nil
+	}
+
+	var outputContents []*genai.Content
+	if len(result.Candidates) > 0 && result.Candidates[0].Content != nil {
+		outputContents = append(outputContents, result.Candidates[0].Content)
+	}
+	newHistory := append(contents, outputContents...)
+
+	newChat, err := c.client.Chats.Create(ctx, Model, c.aiConfig, newHistory)
+	if err != nil {
+		return nil, chat, fmt.Errorf("failed to rebuild chat session after fallback: %w", err)
+	}
+
+	c.chatsLock.Lock()
+	c.chats[chatID] = newChat
+	c.chatsLock.Unlock()
+
+	return result, newChat, nil
 }
 
 // hasUsableContent reports whether a response carries anything worth acting
