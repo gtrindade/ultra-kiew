@@ -20,6 +20,17 @@ const (
 	eventsFileName      = "events.json"
 	groupsFileName      = "groups.json"
 	usersFileName       = "users.json"
+
+	// liveSessionsFileName holds events whose start time has passed but whose
+	// Meet session is still being watched (waiting for it to end, waiting for
+	// a transcript/notes link, or waiting to post the recap). Keeping these
+	// separate from eventsFileName is what lets a new event be scheduled for
+	// a chat the moment the current one starts, instead of the slot staying
+	// occupied for as long as the Meet lifecycle takes to finish -- which
+	// used to be indistinguishable from "an event is still pending" as far as
+	// create() could tell, and blocked scheduling a follow-up session until
+	// someone manually removed the one that had already happened.
+	liveSessionsFileName = "live_sessions.json"
 )
 
 // commonTimezones maps the abbreviations Brazilian players actually type onto
@@ -639,10 +650,15 @@ func (m *Manager) runMonitorTick(ctx context.Context) {
 	events := make(map[string]Event)
 	m.storage.LoadFromDB(eventsFileName, &events)
 
+	liveSessions := make(map[string][]Event)
+	m.storage.LoadFromDB(liveSessionsFileName, &liveSessions)
+
 	archivedEvents := make(map[string][]Event)
 	m.storage.LoadFromDB("archived_events.json", &archivedEvents)
 
-	changed := false
+	eventsChanged := false
+	liveChanged := false
+	archivedChanged := false
 	now := time.Now().Unix()
 
 	for chatIDStr, ev := range events {
@@ -652,7 +668,7 @@ func (m *Manager) runMonitorTick(ctx context.Context) {
 			} else {
 				ev.Meet = &MeetInfo{SpaceName: spaceName, JoinURI: joinURI}
 				events[chatIDStr] = ev
-				changed = true
+				eventsChanged = true
 				log.Printf("Alert: Meet space created for event '%s' in chat %s: %s", ev.Summary, chatIDStr, joinURI)
 			}
 		}
@@ -675,7 +691,7 @@ func (m *Manager) runMonitorTick(ctx context.Context) {
 			m.sendReminder(chatIDStr, ev, whenStr)
 			ev.Reminder12HourSent = true
 			events[chatIDStr] = ev
-			changed = true
+			eventsChanged = true
 		}
 
 		if ev.Timestamp > 0 && !ev.Reminder1HourSent && ev.Timestamp-now <= 60*60 && ev.Timestamp > now {
@@ -695,35 +711,63 @@ func (m *Manager) runMonitorTick(ctx context.Context) {
 			m.sendReminder(chatIDStr, ev, whenStr)
 			ev.Reminder1HourSent = true
 			events[chatIDStr] = ev
-			changed = true
+			eventsChanged = true
 		}
 
 		if ev.Timestamp > 0 && ev.Timestamp <= now {
 			if !ev.ReminderNowSent {
 				m.sendReminder(chatIDStr, ev, "agora")
 				ev.ReminderNowSent = true
-				events[chatIDStr] = ev
-				changed = true
 			}
 
+			// The event has started. It moves out of the single upcoming-slot
+			// map and into the ongoing-session list immediately -- not once
+			// its Meet lifecycle finishes -- specifically so create() (which
+			// only ever looks at `events`) sees this chat as free to schedule
+			// again right away. Its Meet tracking keeps running from the
+			// live-sessions loop below on the very next tick.
+			liveSessions[chatIDStr] = append(liveSessions[chatIDStr], ev)
+			delete(events, chatIDStr)
+			eventsChanged = true
+			liveChanged = true
+			log.Printf("Event '%s' has started for chat %s; now tracked as an ongoing session", ev.Summary, chatIDStr)
+			continue
+		}
+
+		events[chatIDStr] = ev
+	}
+
+	for chatIDStr, sessions := range liveSessions {
+		var stillLive []Event
+		for _, ev := range sessions {
 			updated, finalized, sessionChanged := m.advanceMeetSession(ctx, chatIDStr, ev, now)
 			if sessionChanged {
-				events[chatIDStr] = updated
-				ev = updated
-				changed = true
+				liveChanged = true
 			}
 			if finalized {
 				archivedEvents[chatIDStr] = append(archivedEvents[chatIDStr], updated)
-				delete(events, chatIDStr)
-				changed = true
-				log.Printf("Alert: Event '%s' has been deleted/archived for chat %s", updated.Summary, chatIDStr)
+				archivedChanged = true
+				liveChanged = true
+				log.Printf("Alert: Event '%s' has been archived for chat %s", updated.Summary, chatIDStr)
+				continue
 			}
+			stillLive = append(stillLive, updated)
+		}
+		if len(stillLive) == 0 {
+			delete(liveSessions, chatIDStr)
+		} else {
+			liveSessions[chatIDStr] = stillLive
 		}
 	}
 
-	if changed {
-		m.storage.SaveToDBAsync("archived_events.json", archivedEvents)
+	if eventsChanged {
 		m.storage.MustSave(eventsFileName, events)
+	}
+	if liveChanged {
+		m.storage.MustSave(liveSessionsFileName, liveSessions)
+	}
+	if archivedChanged {
+		m.storage.MustSave("archived_events.json", archivedEvents)
 	}
 }
 

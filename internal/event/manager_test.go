@@ -1,6 +1,7 @@
 package event
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gtrindade/ultra-kiew/internal/googlegenai"
+	"github.com/gtrindade/ultra-kiew/internal/meet"
 	"github.com/gtrindade/ultra-kiew/internal/storage"
 )
 
@@ -372,6 +374,111 @@ func TestBuildAnnouncementCelebratesWhenEveryoneIsOnTime(t *testing.T) {
 	}
 	if !strings.Contains(a.fallback, "Todos confirmados") {
 		t.Errorf("expected the hype fallback, got %q", a.fallback)
+	}
+}
+
+// The exact bug reported in production: an event whose scheduled time has
+// passed used to sit in events.json until its whole Meet lifecycle finished
+// (which can take a long while -- grace periods, artifact waits), and
+// create() refuses whenever anything is already filed under this chat. That
+// meant nobody could schedule the next session without first manually
+// removing the one that had already happened. A started event must free up
+// the chat immediately, not once its Meet tracking is done.
+//
+// With no Meet integration configured, there is nothing to wait for, so the
+// started event is fully archived in the same tick it starts.
+func TestPastEventNoLongerBlocksSchedulingANewOne(t *testing.T) {
+	storageClient := setupTestStorage(t, "America/Sao_Paulo")
+	m := NewManager(storageClient)
+
+	chatIDStr := fmt.Sprintf("%d", testGroupChatID)
+	pastEvent := Event{
+		Date:          "Domingo, 23/08/2026 às 22:00",
+		Timestamp:     time.Now().Add(-1 * time.Minute).Unix(),
+		Summary:       "Sessão que já aconteceu",
+		Confirmations: map[string]string{"@alice": "💪"},
+	}
+	if err := storageClient.SaveToDB(eventsFileName, map[string]Event{chatIDStr: pastEvent}); err != nil {
+		t.Fatalf("failed to seed a past event: %v", err)
+	}
+
+	m.runMonitorTick(context.Background())
+
+	// The chat must now be free: no event blocking a new create().
+	reply, err := m.Manage(groupArgs(map[string]any{
+		"action":         "create",
+		"local_datetime": tomorrowAt(21),
+	}))
+	if err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+	if strings.Contains(reply, "NO NEW EVENT WAS CREATED") {
+		t.Fatalf("new event was blocked by the one that had already started: %q", reply)
+	}
+
+	events := make(map[string]Event)
+	storageClient.LoadFromDB(eventsFileName, &events)
+	if got := events[chatIDStr].Summary; got != "Teste Ultra Kiew" {
+		t.Fatalf("expected the new event to take the chat's slot, got %+v", events[chatIDStr])
+	}
+
+	archivedEvents := make(map[string][]Event)
+	storageClient.LoadFromDB("archived_events.json", &archivedEvents)
+	archived := archivedEvents[chatIDStr]
+	if len(archived) != 1 || archived[0].Summary != "Sessão que já aconteceu" {
+		t.Fatalf("expected the started event to be archived, got %+v", archivedEvents)
+	}
+}
+
+// Same scenario, but with a Meet session still actually running: the started
+// event must move into live_sessions.json (not be dropped, not be archived
+// early) while still freeing up the chat for a new create() right away.
+func TestPastEventWithRunningMeetSessionStillUnblocksScheduling(t *testing.T) {
+	storageClient := setupTestStorage(t, "America/Sao_Paulo")
+	m := NewManager(storageClient)
+	fm := &fakeMeet{records: []meet.ConferenceRecord{{
+		Name:      "conferenceRecords/abc",
+		StartTime: time.Now().Format(time.RFC3339),
+		// No EndTime: the call is still going.
+	}}}
+	m.meet = fm
+
+	chatIDStr := fmt.Sprintf("%d", testGroupChatID)
+	pastEvent := Event{
+		Date:          "Domingo, 23/08/2026 às 22:00",
+		Timestamp:     time.Now().Add(-1 * time.Minute).Unix(),
+		Summary:       "Sessão em andamento",
+		Confirmations: map[string]string{"@alice": "💪"},
+		Meet:          &MeetInfo{SpaceName: "spaces/xyz", JoinURI: "https://meet.google.com/abc-defg-hij"},
+	}
+	if err := storageClient.SaveToDB(eventsFileName, map[string]Event{chatIDStr: pastEvent}); err != nil {
+		t.Fatalf("failed to seed a past event: %v", err)
+	}
+
+	m.runMonitorTick(context.Background())
+
+	reply, err := m.Manage(groupArgs(map[string]any{
+		"action":         "create",
+		"local_datetime": tomorrowAt(21),
+	}))
+	if err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+	if strings.Contains(reply, "NO NEW EVENT WAS CREATED") {
+		t.Fatalf("new event was blocked by the one still in progress: %q", reply)
+	}
+
+	liveSessions := make(map[string][]Event)
+	storageClient.LoadFromDB(liveSessionsFileName, &liveSessions)
+	sessions := liveSessions[chatIDStr]
+	if len(sessions) != 1 || sessions[0].Summary != "Sessão em andamento" {
+		t.Fatalf("expected the still-running session to be tracked in live_sessions.json, got %+v", liveSessions)
+	}
+
+	archivedEvents := make(map[string][]Event)
+	storageClient.LoadFromDB("archived_events.json", &archivedEvents)
+	if len(archivedEvents[chatIDStr]) != 0 {
+		t.Fatalf("a still-running session must not be archived yet, got %+v", archivedEvents)
 	}
 }
 
