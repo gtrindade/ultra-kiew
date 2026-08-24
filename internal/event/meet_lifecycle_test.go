@@ -356,3 +356,51 @@ func TestRunMonitorTickCreatesMeetSpaceOnceThenStops(t *testing.T) {
 		t.Fatalf("expected no further create attempts once a space exists, got %d calls", fm.createSpaceCalls)
 	}
 }
+
+// The exact case reported in production: a session that reconnected once
+// produces two conference records, and with both transcription and "Take
+// notes for me" on, Google gives each record ONE combined doc rather than a
+// separate transcript doc and notes doc -- so it shows up under both labels
+// with the same URL. That must collapse to one link per record (two links
+// total here), not four.
+func TestDedupeMeetLinksCollapsesTheSameDocListedAsBothNotesAndTranscript(t *testing.T) {
+	notes := []string{
+		"https://docs.google.com/document/d/1Hrya.../edit",
+		"https://docs.google.com/document/d/1COuY.../edit",
+	}
+	transcripts := []string{
+		"https://docs.google.com/document/d/1Hrya.../edit",
+		"https://docs.google.com/document/d/1COuY.../edit",
+	}
+
+	got := dedupeMeetLinks(notes, transcripts)
+
+	if len(got) != 2 {
+		t.Fatalf("expected the 4 links to collapse to 2 (one per session segment), got %d: %v", len(got), got)
+	}
+	for _, want := range notes {
+		found := false
+		for _, g := range got {
+			if g == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("expected %q to survive deduplication, got %v", want, got)
+		}
+	}
+}
+
+// Two conference records with genuinely different docs (no reconnect, or a
+// meeting where notes and transcript were never merged) must not be
+// collapsed into each other.
+func TestDedupeMeetLinksKeepsGenuinelyDifferentDocs(t *testing.T) {
+	notes := []string{"https://docs.google.com/document/d/notes-a/edit"}
+	transcripts := []string{"https://docs.google.com/document/d/transcript-a/edit"}
+
+	got := dedupeMeetLinks(notes, transcripts)
+
+	if len(got) != 2 {
+		t.Fatalf("expected both distinct links to survive, got %d: %v", len(got), got)
+	}
+}

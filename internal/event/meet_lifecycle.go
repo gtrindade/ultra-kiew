@@ -240,6 +240,36 @@ func (m *Manager) pollMeetLinks(ctx context.Context, chatIDStr string, meetInfo 
 // are Drive links, and nothing about summarizing or phrasing this belongs to
 // the model -- see the narrative-summary experiment this replaced, which
 // turned out to invent details no matter which Gemini model wrote it.
+// dedupeMeetLinks merges the notes and transcript link lists into one,
+// dropping repeats by URL.
+//
+// When a meeting has both transcription and "Take notes for me" turned on,
+// Google merges them into a single Drive doc rather than producing two -- so
+// the exact same docsDestination.document shows up under both transcripts and
+// smartNotes. Labeling that one link twice ("Notas: X" / "Transcrição: X")
+// reads as two artifacts when it is actually one. Two genuinely different
+// links do still mean two different segments of the session (a brief
+// reconnect splits it into more than one conference record), and both are
+// worth keeping -- that is not a duplicate, and this only collapses an exact
+// URL match, never records against each other.
+func dedupeMeetLinks(notesLinks, transcriptLinks []string) []string {
+	seen := make(map[string]bool)
+	var links []string
+	for _, link := range notesLinks {
+		if !seen[link] {
+			seen[link] = true
+			links = append(links, link)
+		}
+	}
+	for _, link := range transcriptLinks {
+		if !seen[link] {
+			seen[link] = true
+			links = append(links, link)
+		}
+	}
+	return links
+}
+
 func (m *Manager) postMeetRecap(chatIDStr string, ev Event, meetInfo MeetInfo) {
 	if m.bot == nil {
 		return
@@ -249,24 +279,21 @@ func (m *Manager) postMeetRecap(chatIDStr string, ev Event, meetInfo MeetInfo) {
 		return
 	}
 
-	hasLinks := len(meetInfo.TranscriptLinks) > 0 || len(meetInfo.SmartNotesLinks) > 0
+	links := dedupeMeetLinks(meetInfo.SmartNotesLinks, meetInfo.TranscriptLinks)
 
 	var text string
-	if !hasLinks {
+	if len(links) == 0 {
 		text = fmt.Sprintf("A sessão %q terminou, mas não encontrei transcrição ou anotações geradas para ela.", ev.Summary)
 	} else {
 		text = fmt.Sprintf("A sessão %q terminou! Aqui está o material da call:\n", ev.Summary)
-		for _, link := range meetInfo.SmartNotesLinks {
-			text += "\n📝 Notas: " + link
-		}
-		for _, link := range meetInfo.TranscriptLinks {
-			text += "\n📄 Transcrição: " + link
+		for _, link := range links {
+			text += "\n📄 " + link
 		}
 		text += "\n\n(Esses links só abrem para quem já tem acesso no Drive -- compartilhe manualmente se precisar.)"
 	}
 
 	params := &bot.SendMessageParams{ChatID: chatID, Text: text}
-	if hasLinks {
+	if len(links) > 0 {
 		// Same reasoning as the Meet join link in reminders: Telegram's
 		// preview for a Drive doc link is generic and adds nothing here.
 		params.LinkPreviewOptions = &models.LinkPreviewOptions{IsDisabled: bot.True()}
