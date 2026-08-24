@@ -34,10 +34,19 @@ const (
 	meetMaxSessionLength = 12 * time.Hour
 
 	// meetArtifactMaxWait is how long, after the session is deemed over, to
-	// keep retrying for transcript/notes links before posting the recap with
-	// whatever was found -- artifacts land a few minutes after the call ends,
-	// not instantly, but they should not be waited on indefinitely either.
-	meetArtifactMaxWait = 30 * time.Minute
+	// keep retrying for transcript/notes links before giving up and posting
+	// the recap saying nothing was found. Google can take a long while to
+	// finish generating a transcript for a long session -- these run up to
+	// several hours -- so this is deliberately generous rather than assuming
+	// "a few minutes" covers every case.
+	meetArtifactMaxWait = 24 * time.Hour
+
+	// meetArtifactPollInterval paces how often the Meet API is actually
+	// checked during that wait. Checking on every monitor tick (once a
+	// minute) for up to 24 hours would be thousands of calls per session for
+	// no benefit -- a transcript does not appear gradually, it either exists
+	// on a given check or it does not.
+	meetArtifactPollInterval = 10 * time.Minute
 )
 
 // MeetInfo holds everything about the Google Meet space tied to one event.
@@ -64,6 +73,12 @@ type MeetInfo struct {
 	TranscriptLinks []string `json:"transcript_links,omitempty"`
 	SmartNotesLinks []string `json:"smart_notes_links,omitempty"`
 	RecapPosted     bool     `json:"recap_posted,omitempty"`
+
+	// LastArtifactPollAt is when transcript/notes links were last actually
+	// checked (unix seconds), so that check can be paced to
+	// meetArtifactPollInterval instead of running on every monitor tick for
+	// the entire meetArtifactMaxWait window.
+	LastArtifactPollAt int64 `json:"last_artifact_poll_at,omitempty"`
 }
 
 // MeetClient is everything the event lifecycle needs from Google Meet.
@@ -113,8 +128,14 @@ func (m *Manager) advanceMeetSession(ctx context.Context, chatIDStr string, ev E
 	}
 
 	if !meetInfo.RecapPosted {
-		linksChanged := m.pollMeetLinks(ctx, chatIDStr, &meetInfo)
-		changed = changed || linksChanged
+		pollDue := meetInfo.LastArtifactPollAt == 0 || now-meetInfo.LastArtifactPollAt >= int64(meetArtifactPollInterval.Seconds())
+		if pollDue && len(meetInfo.ConferenceRecords) > 0 {
+			if m.pollMeetLinks(ctx, chatIDStr, &meetInfo) {
+				changed = true
+			}
+			meetInfo.LastArtifactPollAt = now
+			changed = true
+		}
 
 		haveLinks := len(meetInfo.TranscriptLinks) > 0 || len(meetInfo.SmartNotesLinks) > 0
 		waitedLongEnough := now-meetInfo.SessionEndedAt >= int64(meetArtifactMaxWait.Seconds())

@@ -21,8 +21,10 @@ type fakeMeet struct {
 	records []meet.ConferenceRecord
 	listErr error
 
-	transcriptLinks map[string][]string // by conference record name
-	notesLinks      map[string][]string
+	transcriptLinks     map[string][]string // by conference record name
+	notesLinks          map[string][]string
+	transcriptLinkCalls int
+	notesLinkCalls      int
 }
 
 func (f *fakeMeet) CreateSpace(ctx context.Context) (string, string, error) {
@@ -41,10 +43,12 @@ func (f *fakeMeet) ListConferenceRecords(ctx context.Context, spaceName string) 
 }
 
 func (f *fakeMeet) TranscriptLinks(ctx context.Context, recordName string) ([]string, error) {
+	f.transcriptLinkCalls++
 	return f.transcriptLinks[recordName], nil
 }
 
 func (f *fakeMeet) SmartNotesLinks(ctx context.Context, recordName string) ([]string, error) {
+	f.notesLinkCalls++
 	return f.notesLinks[recordName], nil
 }
 
@@ -178,6 +182,58 @@ func TestAdvanceMeetSessionHitsHardCap(t *testing.T) {
 	}
 	if !updated.Meet.SessionEnded {
 		t.Fatal("expected SessionEnded to be set by the hard cap")
+	}
+}
+
+// A long session (these run up to several hours) must not have its transcript
+// check give up after 30 minutes -- it must keep trying for up to
+// meetArtifactMaxWait (24h), and it must not do so by hammering the API once a
+// minute for that whole window: the check should only actually run once every
+// meetArtifactPollInterval.
+func TestAdvanceMeetSessionPacesArtifactChecksRatherThanPollingEveryTick(t *testing.T) {
+	fm := &fakeMeet{}
+	m := newTestManager(t, fm)
+
+	now := time.Now().Unix()
+	ev := Event{
+		Summary: "Sessão longa",
+		Meet: &MeetInfo{
+			SpaceName:         "spaces/xyz",
+			ConferenceRecords: []string{"conferenceRecords/abc"},
+			SessionEnded:      true,
+			SessionEndedAt:    now - 60, // ended a minute ago
+		},
+	}
+
+	// First tick after the session ends: no LastArtifactPollAt yet, so the
+	// check must run immediately rather than waiting a full interval.
+	updated, finalized, _ := m.advanceMeetSession(context.Background(), "-100", ev, now)
+	if finalized {
+		t.Fatal("should still be waiting, well within meetArtifactMaxWait")
+	}
+	if fm.transcriptLinkCalls != 1 || fm.notesLinkCalls != 1 {
+		t.Fatalf("expected exactly one check on the first tick, got %d/%d", fm.transcriptLinkCalls, fm.notesLinkCalls)
+	}
+	if updated.Meet.LastArtifactPollAt != now {
+		t.Fatalf("expected LastArtifactPollAt to be recorded, got %d", updated.Meet.LastArtifactPollAt)
+	}
+
+	// A tick 1 minute later (as the real ticker runs) must NOT check again --
+	// meetArtifactPollInterval has not elapsed.
+	soonAfter := now + 60
+	updated, _, _ = m.advanceMeetSession(context.Background(), "-100", updated, soonAfter)
+	if fm.transcriptLinkCalls != 1 || fm.notesLinkCalls != 1 {
+		t.Fatalf("expected no additional check before the poll interval elapses, got %d/%d", fm.transcriptLinkCalls, fm.notesLinkCalls)
+	}
+
+	// Once meetArtifactPollInterval has actually elapsed, it should check again.
+	afterInterval := now + int64(meetArtifactPollInterval.Seconds()) + 1
+	updated, _, _ = m.advanceMeetSession(context.Background(), "-100", updated, afterInterval)
+	if fm.transcriptLinkCalls != 2 || fm.notesLinkCalls != 2 {
+		t.Fatalf("expected a second check after the poll interval elapsed, got %d/%d", fm.transcriptLinkCalls, fm.notesLinkCalls)
+	}
+	if updated.Meet.LastArtifactPollAt != afterInterval {
+		t.Fatalf("expected LastArtifactPollAt to advance, got %d", updated.Meet.LastArtifactPollAt)
 	}
 }
 
