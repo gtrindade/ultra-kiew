@@ -286,6 +286,28 @@ func TestResolveTimezone(t *testing.T) {
 	}
 }
 
+// This exact behavior went missing once already -- written, described to the
+// user as done, and silently dropped in a later rewrite -- so it gets its own
+// direct test rather than relying only on the end-to-end coverage in
+// meet_lifecycle_test.go.
+func TestAppendMeetLinkAddsTheJoinURI(t *testing.T) {
+	got := appendMeetLink("Prepare-se!", &MeetInfo{JoinURI: "https://meet.google.com/abc-defg-hij"})
+	if !strings.Contains(got, "https://meet.google.com/abc-defg-hij") {
+		t.Fatalf("expected the join link to be appended, got %q", got)
+	}
+	if !strings.HasPrefix(got, "Prepare-se!") {
+		t.Fatalf("expected the original text to be preserved, got %q", got)
+	}
+}
+
+func TestAppendMeetLinkLeavesTextUnchangedWithNoMeet(t *testing.T) {
+	for _, meetInfo := range []*MeetInfo{nil, {JoinURI: ""}} {
+		if got := appendMeetLink("Prepare-se!", meetInfo); got != "Prepare-se!" {
+			t.Errorf("expected no change with meet=%+v, got %q", meetInfo, got)
+		}
+	}
+}
+
 func mustLoad(t *testing.T, name string) *time.Location {
 	t.Helper()
 	loc, err := time.LoadLocation(name)

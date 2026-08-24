@@ -625,6 +625,23 @@ func (m *Manager) runMonitorTick(ctx context.Context) {
 	}
 }
 
+// appendMeetLink adds the join link after generation, never handing it to the
+// model to weave in -- same reason the tags are verified rather than trusted:
+// a URL is not something to let a paraphrase-prone model retype.
+//
+// This is its own function, rather than inline in sendReminder, because it
+// went missing once already: the append was written, described, and believed
+// committed, but silently dropped in a later rewrite of the surrounding code
+// and nothing caught it until a real reminder shipped with no link. A named
+// function with a direct test is what makes that regression visible again if
+// it happens a second time.
+func appendMeetLink(text string, meetInfo *MeetInfo) string {
+	if meetInfo == nil || meetInfo.JoinURI == "" {
+		return text
+	}
+	return text + "\n\n🔗 " + meetInfo.JoinURI
+}
+
 func (m *Manager) sendReminder(chatIDStr string, ev Event, when string) {
 	var confirmedUsers []string
 	for u, conf := range ev.Confirmations {
@@ -663,6 +680,8 @@ func (m *Manager) sendReminder(chatIDStr string, ev Event, when string) {
 			break
 		}
 	}
+
+	text = appendMeetLink(text, ev.Meet)
 
 	log.Printf("Alert: Reminder sent for event '%s' (%s) to chat %s", ev.Summary, timeMsg, chatIDStr)
 
