@@ -339,6 +339,13 @@ func (m *Manager) create(args map[string]any, chatID int64, chatIDStr string, ev
 		// later. Uses the same resolved location as the event's own time, so
 		// "today" means today in the group's timezone, not the server's.
 		LastNoResponseNudgeDate: time.Now().In(loc).Format("2006-01-02"),
+		// If the event itself is being scheduled with less than 24h's notice,
+		// the 24-hour mark is already behind us at creation time -- there is
+		// no "24 hours before" left to warn anyone at. Pre-latching this
+		// keeps the callout from firing on (or immediately after) the very
+		// first tick, which would otherwise call people out for not having
+		// answered an invite they may have received minutes ago.
+		Reminder24hCalloutSent: t.Before(time.Now().Add(24 * time.Hour)),
 	}
 	m.storage.MustSave(eventsFileName, events)
 

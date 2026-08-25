@@ -635,6 +635,53 @@ func TestSend24hCalloutIsSafeWithNoBotConfigured(t *testing.T) {
 // End-to-end through the real tick: an event 23h59m out with a pending
 // responder must have the callout latch set after one tick, and it must stay
 // set (not refire) on the next.
+// An event scheduled with less than 24h notice has no "24 hours before" left
+// to warn anyone at by the time it exists -- the callout must be pre-latched
+// at creation so it never fires and calls people out for not yet answering an
+// invite they may have received minutes ago.
+func TestCreatePreLatchesThe24hCalloutForShortNoticeEvents(t *testing.T) {
+	storageClient := setupTestStorage(t, "America/Sao_Paulo")
+	m := NewManager(storageClient)
+	loc := mustLoad(t, "America/Sao_Paulo")
+
+	soon := time.Now().Add(2 * time.Hour).In(loc).Format("2006-01-02T15:04")
+	if _, err := m.Manage(groupArgs(map[string]any{
+		"action":         "create",
+		"local_datetime": soon,
+	})); err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+
+	events := make(map[string]Event)
+	storageClient.LoadFromDB(eventsFileName, &events)
+	if !events[fmt.Sprintf("%d", testGroupChatID)].Reminder24hCalloutSent {
+		t.Fatal("expected the 24h callout to be pre-latched for a 2-hours-out event")
+	}
+}
+
+// An event scheduled with a full day or more of notice must NOT be
+// pre-latched -- the callout should still fire normally at its 24-hour mark.
+func TestCreateDoesNotPreLatchThe24hCalloutForNormalNoticeEvents(t *testing.T) {
+	storageClient := setupTestStorage(t, "America/Sao_Paulo")
+	m := NewManager(storageClient)
+	loc := mustLoad(t, "America/Sao_Paulo")
+
+	// Comfortably more than 24h out regardless of what time "now" is.
+	wellAhead := time.Now().Add(48 * time.Hour).In(loc).Format("2006-01-02T15:04")
+	if _, err := m.Manage(groupArgs(map[string]any{
+		"action":         "create",
+		"local_datetime": wellAhead,
+	})); err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+
+	events := make(map[string]Event)
+	storageClient.LoadFromDB(eventsFileName, &events)
+	if events[fmt.Sprintf("%d", testGroupChatID)].Reminder24hCalloutSent {
+		t.Fatal("should not pre-latch the 24h callout for an event scheduled well over a day out")
+	}
+}
+
 func TestRunMonitorTickLatches24hCalloutOnce(t *testing.T) {
 	storageClient := setupTestStorage(t, "America/Sao_Paulo")
 	m := NewManager(storageClient)
