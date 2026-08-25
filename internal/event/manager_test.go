@@ -532,6 +532,44 @@ func TestBuildReminderMessageIsEmptyWithNoConfirmedUsers(t *testing.T) {
 	}
 }
 
+// The initial invite DM is sent at creation time, so the daily no-response
+// nudge must not repeat that same ask hours later on the same day -- it
+// should wait until the following day.
+func TestCreateSeedsTheNudgeDateSoDailyNudgeWaitsUntilTomorrow(t *testing.T) {
+	storageClient := setupTestStorage(t, "America/Sao_Paulo")
+	m := NewManager(storageClient)
+
+	if _, err := m.Manage(groupArgs(map[string]any{
+		"action":         "create",
+		"local_datetime": tomorrowAt(21),
+	})); err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+
+	loc := mustLoad(t, "America/Sao_Paulo")
+	today := time.Now().In(loc).Format("2006-01-02")
+
+	events := make(map[string]Event)
+	storageClient.LoadFromDB(eventsFileName, &events)
+	ev := events[fmt.Sprintf("%d", testGroupChatID)]
+	if ev.LastNoResponseNudgeDate != today {
+		t.Fatalf("expected the nudge date to be seeded to today (%s), got %q", today, ev.LastNoResponseNudgeDate)
+	}
+
+	// Later the same day, at or after 9am: must not nudge again.
+	laterToday := time.Date(time.Now().In(loc).Year(), time.Now().In(loc).Month(), time.Now().In(loc).Day(), 15, 0, 0, 0, loc).Unix()
+	if m.maybeSendDailyNudges(&ev, Group{Timezone: "America/Sao_Paulo"}, map[string]int64{}, laterToday) {
+		t.Fatal("should not nudge on the day the event was created")
+	}
+
+	// The next day at 9am: should nudge normally.
+	tomorrow9am := time.Now().In(loc).AddDate(0, 0, 1)
+	tomorrow9am = time.Date(tomorrow9am.Year(), tomorrow9am.Month(), tomorrow9am.Day(), 9, 0, 0, 0, loc)
+	if !m.maybeSendDailyNudges(&ev, Group{Timezone: "America/Sao_Paulo"}, map[string]int64{}, tomorrow9am.Unix()) {
+		t.Fatal("expected a nudge the day after creation")
+	}
+}
+
 func TestNoResponseUsersTreatsMissingAndQuestionMarkTheSame(t *testing.T) {
 	confirmations := map[string]string{"@alice": "❔", "@bob": "💪", "@carol": ""}
 	got := noResponseUsers(confirmations)

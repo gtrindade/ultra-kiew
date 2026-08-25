@@ -333,6 +333,12 @@ func (m *Manager) create(args map[string]any, chatID int64, chatIDStr string, ev
 		Summary:       summary,
 		MessageID:     messageID,
 		Confirmations: confirmations,
+		// The invite DM was just sent above, so the daily no-response nudge
+		// has nothing to add today -- seeding today's date here is what makes
+		// it wait until tomorrow rather than repeating the same ask hours
+		// later. Uses the same resolved location as the event's own time, so
+		// "today" means today in the group's timezone, not the server's.
+		LastNoResponseNudgeDate: time.Now().In(loc).Format("2006-01-02"),
 	}
 	m.storage.MustSave(eventsFileName, events)
 
