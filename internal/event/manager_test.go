@@ -482,6 +482,56 @@ func TestPastEventWithRunningMeetSessionStillUnblocksScheduling(t *testing.T) {
 	}
 }
 
+// The exact case reported in production: one player never answered the
+// invite. The reminder must still fire for whoever did confirm -- the
+// session happens either way -- but the model must be told someone never
+// responded, rather than the prompt looking like everyone is accounted for.
+func TestBuildReminderMessageFlagsSomeoneWhoNeverResponded(t *testing.T) {
+	confirmations := map[string]string{
+		"@alice": "💪",
+		"@bob":   "❔", // never answered
+	}
+
+	rm := buildReminderMessage("Test Ultra-Kiew", confirmations, "AGORA")
+
+	if len(rm.confirmedTags) != 1 || rm.confirmedTags[0] != "@alice" {
+		t.Fatalf("expected only @alice to be tagged/counted as coming, got %v", rm.confirmedTags)
+	}
+	if !strings.Contains(rm.prompt, "@bob") {
+		t.Errorf("expected the prompt to flag @bob as never having responded, got %q", rm.prompt)
+	}
+	if !strings.Contains(rm.fallback, "@bob") {
+		t.Errorf("expected the fallback to mention @bob too, got %q", rm.fallback)
+	}
+}
+
+// When everyone has answered and confirmed, no extra roster context is
+// needed -- the reminder should read exactly as it did before this feature.
+func TestBuildReminderMessageAddsNoExtraContextWhenEveryoneConfirmed(t *testing.T) {
+	confirmations := map[string]string{"@alice": "💪", "@bob": "💪"}
+
+	rm := buildReminderMessage("Test Ultra-Kiew", confirmations, "AGORA")
+
+	if strings.Contains(rm.prompt, "Nem todo mundo respondeu") {
+		t.Errorf("expected no roster-context note when everyone confirmed, got %q", rm.prompt)
+	}
+	if len(rm.confirmedTags) != 2 {
+		t.Errorf("expected both users tagged, got %v", rm.confirmedTags)
+	}
+}
+
+// No confirmed attendees at all: the reminder must not fire (nobody to remind
+// or tag), same as before this feature.
+func TestBuildReminderMessageIsEmptyWithNoConfirmedUsers(t *testing.T) {
+	confirmations := map[string]string{"@alice": "❔", "@bob": "🐔"}
+
+	rm := buildReminderMessage("Test Ultra-Kiew", confirmations, "AGORA")
+
+	if len(rm.confirmedTags) != 0 || rm.prompt != "" {
+		t.Fatalf("expected an empty reminderMessage with no one confirmed, got %+v", rm)
+	}
+}
+
 func mustLoad(t *testing.T, name string) *time.Location {
 	t.Helper()
 	loc, err := time.LoadLocation(name)

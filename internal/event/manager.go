@@ -788,15 +788,73 @@ func appendMeetLink(text string, meetInfo *MeetInfo) string {
 	return text + "\n\n🔗 " + meetInfo.JoinURI
 }
 
-func (m *Manager) sendReminder(chatIDStr string, ev Event, when string) {
-	var confirmedUsers []string
-	for u, conf := range ev.Confirmations {
-		if conf == "💪" || strings.HasPrefix(conf, "🐢") {
+// reminderMessage is what buildReminderMessage decides, and everything
+// sendReminder needs to act on that decision.
+type reminderMessage struct {
+	prompt        string
+	fallback      string
+	confirmedTags []string // must all appear in the generated text, or fall back
+}
+
+// buildReminderMessage classifies the invite roster and builds the prompt for
+// one reminder. The reminder fires regardless of whether everyone answered --
+// the session happens at its scheduled time either way -- but the model is
+// told the actual roster (who is late, who never answered, who confirmed they
+// are not coming) so it can react to that honestly instead of the message
+// reading as if everyone is confirmed when they are not.
+//
+// Pulled out of sendReminder, same as buildAnnouncement was, so the roster
+// classification and prompt construction are directly testable without a bot
+// double.
+func buildReminderMessage(summary string, confirmations map[string]string, timeMsg string) reminderMessage {
+	var confirmedUsers, lateUsers, noResponseUsers, absentUsers []string
+	for u, conf := range confirmations {
+		switch {
+		case conf == "💪":
 			confirmedUsers = append(confirmedUsers, u)
+		case strings.HasPrefix(conf, "🐢"):
+			confirmedUsers = append(confirmedUsers, u)
+			lateUsers = append(lateUsers, u)
+		case conf == "🐔":
+			absentUsers = append(absentUsers, u)
+		default:
+			noResponseUsers = append(noResponseUsers, u)
 		}
 	}
 
 	if len(confirmedUsers) == 0 {
+		return reminderMessage{}
+	}
+
+	tags := strings.Join(confirmedUsers, " ")
+
+	prompt := fmt.Sprintf("Gere uma mensagem animada, nerd e curta avisando que a sessão %q vai começar %s. Diga para eles se prepararem.", summary, timeMsg)
+	fallback := fmt.Sprintf("Atenção %s! O evento '%s' começa %s!", tags, summary, timeMsg)
+
+	if len(lateUsers) > 0 || len(noResponseUsers) > 0 || len(absentUsers) > 0 {
+		prompt += fmt.Sprintf(`
+
+Nem todo mundo respondeu ao convite. Atrasados: %s. Nunca responderam ao convite: %s. Confirmaram que não vão: %s.
+Se fizer sentido, inclua uma cutucada leve e proporcional sobre isso -- não trate como uma crise, é só contexto, e a sessão vai acontecer do mesmo jeito. Não cite nenhum nome além dos listados acima.`,
+			joinOrNenhum(lateUsers), joinOrNenhum(noResponseUsers), joinOrNenhum(absentUsers))
+
+		fallback += fmt.Sprintf(" (atrasados: %s; sem resposta: %s; não vão: %s)",
+			joinOrNenhum(lateUsers), joinOrNenhum(noResponseUsers), joinOrNenhum(absentUsers))
+	}
+
+	prompt += fmt.Sprintf("\n\nNo final da mensagem inclua exatamente estas marcações de usuários, sem alterar nada: %s", tags)
+
+	return reminderMessage{prompt: prompt, fallback: fallback, confirmedTags: confirmedUsers}
+}
+
+func (m *Manager) sendReminder(chatIDStr string, ev Event, when string) {
+	timeMsg := "daqui a " + when
+	if when == "agora" {
+		timeMsg = "AGORA"
+	}
+
+	rm := buildReminderMessage(ev.Summary, ev.Confirmations, timeMsg)
+	if len(rm.confirmedTags) == 0 {
 		return
 	}
 
@@ -805,15 +863,7 @@ func (m *Manager) sendReminder(chatIDStr string, ev Event, when string) {
 		return
 	}
 
-	tags := strings.Join(confirmedUsers, " ")
-
-	timeMsg := "daqui a " + when
-	if when == "agora" {
-		timeMsg = "AGORA"
-	}
-
-	prompt := fmt.Sprintf("Gere uma mensagem animada, nerd e curta avisando que a sessão %q vai começar %s. Diga para eles se prepararem. No final da mensagem inclua exatamente estas marcações de usuários, sem alterar nada: %s", ev.Summary, timeMsg, tags)
-	fallback := fmt.Sprintf("Atenção %s! O evento '%s' começa %s!", tags, ev.Summary, timeMsg)
+	prompt, fallback, confirmedUsers := rm.prompt, rm.fallback, rm.confirmedTags
 
 	text := m.generateOrFallback(prompt, fallback)
 
