@@ -139,9 +139,16 @@ func TestAdvanceMeetSessionFinalizesAfterGracePeriodWithNoRecap(t *testing.T) {
 	}
 }
 
-// If nobody ever joins, Segments stays empty forever -- this must
-// still finalize eventually rather than tracking the event indefinitely.
-func TestAdvanceMeetSessionFinalizesOnNoShow(t *testing.T) {
+// If nobody ever joins, Segments stays empty -- SessionEnded should still
+// latch after meetNoShowGrace (there is no session to keep watching), but
+// this must NOT finalize and post "não encontrei" immediately. A transient
+// empty response from ListConferenceRecords right as a real meeting starts
+// looks identical to a genuine no-show, and RecapPosted latches permanently:
+// an instant give-up here can never be corrected once the real conference
+// record (and its transcript) shows up moments later. See
+// TestAdvanceMeetSessionEventuallyGivesUpOnAGenuineNoShow for the case where
+// it should finalize.
+func TestAdvanceMeetSessionDoesNotFinalizeImmediatelyOnApparentNoShow(t *testing.T) {
 	fm := &fakeMeet{records: nil}
 	m := newTestManager(t, fm)
 
@@ -154,8 +161,37 @@ func TestAdvanceMeetSessionFinalizesOnNoShow(t *testing.T) {
 
 	updated, finalized, _ := m.advanceMeetSession(context.Background(), "-100", ev, now)
 
+	if !updated.Meet.SessionEnded {
+		t.Fatal("expected SessionEnded to latch after meetNoShowGrace with zero records seen")
+	}
+	if finalized {
+		t.Fatal("must not finalize (and post 'não encontrei') the instant no-show grace elapses -- that read of the API could be wrong")
+	}
+	if updated.Meet.RecapPosted {
+		t.Fatal("must not post a recap yet")
+	}
+}
+
+// Past meetArtifactMaxWait with genuinely zero records ever seen, it must
+// still eventually give up rather than tracking the event forever.
+func TestAdvanceMeetSessionEventuallyGivesUpOnAGenuineNoShow(t *testing.T) {
+	fm := &fakeMeet{records: nil}
+	m := newTestManager(t, fm)
+
+	now := time.Now().Unix()
+	ev := Event{
+		Summary: "Sessão de teste",
+		Meet: &MeetInfo{
+			SpaceName:      "spaces/xyz",
+			SessionEnded:   true,
+			SessionEndedAt: now - int64((meetArtifactMaxWait + time.Minute).Seconds()),
+		},
+	}
+
+	updated, finalized, _ := m.advanceMeetSession(context.Background(), "-100", ev, now)
+
 	if !finalized {
-		t.Fatal("expected a no-show session to finalize after meetNoShowGrace")
+		t.Fatal("expected a genuine no-show to finalize once meetArtifactMaxWait has passed")
 	}
 	if !updated.Meet.RecapPosted {
 		t.Fatal("expected a recap (even an empty one) to be posted")

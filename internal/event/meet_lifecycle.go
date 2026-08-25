@@ -172,14 +172,29 @@ func (m *Manager) advanceMeetSession(ctx context.Context, chatIDStr string, ev E
 			}
 		}
 		waitedLongEnough := now-meetInfo.SessionEndedAt >= int64(meetArtifactMaxWait.Seconds())
-		nothingToWaitFor := len(meetInfo.Segments) == 0
 
+		// There used to be a third condition here, "no conference records at
+		// all seen for this space" -- on the theory that a genuine no-show
+		// has nothing to wait for. In practice that fired the instant the
+		// no-show grace period elapsed, and it could not tell a real no-show
+		// apart from ListConferenceRecords simply not having caught up yet
+		// with a session that was, in fact, happening: a transient empty
+		// response right as the meeting starts looks identical to nobody
+		// having joined. Because RecapPosted latches permanently, that false
+		// "não encontrei" could never be corrected even once the real record
+		// (and its transcript) showed up later -- pollConferenceRecords stops
+		// being called the moment SessionEnded is true, so a record that
+		// appears afterward is never even discovered. Giving up only ever
+		// happens now for a reason that cannot be a false read of the API:
+		// something was actually found, the full wait genuinely elapsed, or
+		// the hard cap fired.
+		//
 		// hardCapped skips the artifact wait entirely: reaching the hard cap
 		// already means something took far longer than any real session
 		// should, so waiting another meetArtifactMaxWait on top of that for
 		// artifacts that are equally unlikely to ever arrive would just be
 		// compounding the same failure.
-		if haveLinks || waitedLongEnough || nothingToWaitFor || hardCapped {
+		if haveLinks || waitedLongEnough || hardCapped {
 			m.postMeetRecap(chatIDStr, ev, meetInfo)
 			meetInfo.RecapPosted = true
 			changed = true
