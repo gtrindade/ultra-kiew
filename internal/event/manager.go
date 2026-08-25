@@ -132,6 +132,18 @@ type Event struct {
 	// changing their answer posted the celebration message a second time.
 	AllRespondedSent bool      `json:"all_responded_sent,omitempty"`
 	Meet             *MeetInfo `json:"meet,omitempty"`
+
+	// LastNoResponseNudgeDate is the date (YYYY-MM-DD, in the group's
+	// timezone) non-responders were last DMed a nudge. Comparing dates rather
+	// than latching a bool is what makes this a once-per-day nudge instead of
+	// a once-ever one: whoever still has not answered gets DMed again the
+	// next day, and the day after that, until they do.
+	LastNoResponseNudgeDate string `json:"last_no_response_nudge_date,omitempty"`
+
+	// Reminder24hCalloutSent latches the "who hasn't responded yet" public
+	// callout at the 24-hour mark, so it only ever fires once -- whether or
+	// not anyone was actually missing at that exact moment.
+	Reminder24hCalloutSent bool `json:"reminder_24h_callout_sent,omitempty"`
 }
 
 type Group struct {
@@ -656,12 +668,31 @@ func (m *Manager) runMonitorTick(ctx context.Context) {
 	archivedEvents := make(map[string][]Event)
 	m.storage.LoadFromDB("archived_events.json", &archivedEvents)
 
+	groups := make(map[string]Group)
+	m.storage.LoadFromDB(groupsFileName, &groups)
+
+	knownUsers := make(map[string]int64)
+	m.storage.LoadFromDB(usersFileName, &knownUsers)
+
 	eventsChanged := false
 	liveChanged := false
 	archivedChanged := false
 	now := time.Now().Unix()
 
 	for chatIDStr, ev := range events {
+		if ev.Timestamp > 0 && ev.Timestamp > now {
+			if m.maybeSendDailyNudges(&ev, groups[chatIDStr], knownUsers, now) {
+				events[chatIDStr] = ev
+				eventsChanged = true
+			}
+		}
+
+		if ev.Timestamp > 0 && !ev.Reminder24hCalloutSent && ev.Timestamp-now <= 24*60*60 && ev.Timestamp > now {
+			m.send24hCallout(chatIDStr, ev)
+			ev.Reminder24hCalloutSent = true
+			events[chatIDStr] = ev
+			eventsChanged = true
+		}
 		if m.meet != nil && ev.Meet == nil {
 			if spaceName, joinURI, err := m.meet.CreateSpace(ctx); err != nil {
 				log.Printf("could not create Meet space for chat %s: %v", chatIDStr, err)
@@ -845,6 +876,113 @@ Se fizer sentido, inclua uma cutucada leve e proporcional sobre isso -- não tra
 	prompt += fmt.Sprintf("\n\nNo final da mensagem inclua exatamente estas marcações de usuários, sem alterar nada: %s", tags)
 
 	return reminderMessage{prompt: prompt, fallback: fallback, confirmedTags: confirmedUsers}
+}
+
+// noResponseUsers lists everyone still on "❔" -- invited, but never having
+// answered yes/no/late at all. A missing key counts the same as an explicit
+// "❔": both mean nobody has recorded an answer for that user yet.
+func noResponseUsers(confirmations map[string]string) []string {
+	var users []string
+	for u, conf := range confirmations {
+		if conf == "" || conf == "❔" {
+			users = append(users, u)
+		}
+	}
+	return users
+}
+
+const dailyNudgeHour = 9
+
+// maybeSendDailyNudges DMs everyone who has not yet answered an invite, once
+// per calendar day at or after 9am in the group's own timezone -- not the
+// server's, for the same reason event scheduling itself resolves times
+// against the group's recorded zone rather than guessing.
+//
+// This only ever nudges people already known to have a DM chat with the bot
+// (the same requirement create() already has for the initial invite); anyone
+// who has never messaged the bot privately cannot be reached this way, and
+// that is reported at event-creation time already, not repeated here.
+func (m *Manager) maybeSendDailyNudges(ev *Event, group Group, knownUsers map[string]int64, now int64) (changed bool) {
+	pending := noResponseUsers(ev.Confirmations)
+	if len(pending) == 0 {
+		return false
+	}
+
+	loc := time.UTC
+	if group.Timezone != "" {
+		if l, err := time.LoadLocation(group.Timezone); err == nil {
+			loc = l
+		}
+	}
+
+	localNow := time.Unix(now, 0).In(loc)
+	if localNow.Hour() < dailyNudgeHour {
+		return false
+	}
+
+	today := localNow.Format("2006-01-02")
+	if ev.LastNoResponseNudgeDate == today {
+		return false
+	}
+
+	if m.bot != nil {
+		for _, u := range pending {
+			uid, ok := knownUsers[u]
+			if !ok {
+				continue
+			}
+			m.bot.SendMessage(context.Background(), &bot.SendMessageParams{
+				ChatID: uid,
+				Text:   fmt.Sprintf("Lembrete: você ainda não respondeu se vai para %q (%s). Me avisa quando puder!", ev.Summary, ev.Date),
+			})
+		}
+	}
+
+	log.Printf("Alert: daily no-response nudge sent for event '%s' (%s)", ev.Summary, strings.Join(pending, " "))
+	ev.LastNoResponseNudgeDate = today
+	return true
+}
+
+// send24hCallout posts, once, a public jab at whoever still has not answered
+// with 24 hours left before the session -- deliberately public rather than
+// another DM, since a private nudge has already been tried daily and this is
+// meant to add a little social pressure instead.
+func (m *Manager) send24hCallout(chatIDStr string, ev Event) {
+	pending := noResponseUsers(ev.Confirmations)
+	if len(pending) == 0 {
+		return
+	}
+
+	chatID, err := strconv.ParseInt(chatIDStr, 10, 64)
+	if err != nil {
+		return
+	}
+
+	names := strings.Join(pending, " ")
+	prompt := fmt.Sprintf("Gere uma mensagem engraçada e levemente provocativa no grupo, dedurando que faltam 24 horas para a sessão %q e que estas pessoas ainda não responderam se vão: %s. Peça para elas responderem logo. Não cite ninguém além das listadas. No final da mensagem inclua exatamente estas marcações, sem alterar nada: %s", ev.Summary, names, names)
+	fallback := fmt.Sprintf("Atenção %s! Faltam 24 horas para %q e vocês ainda não responderam se vão. Bora responder!", names, ev.Summary)
+
+	text := m.generateOrFallback(prompt, fallback)
+
+	// Same reasoning as the reminder tags: the point of the message is naming
+	// these specific people, so verify rather than trust.
+	for _, u := range pending {
+		if !strings.Contains(text, u) {
+			log.Printf("24h callout dropped a tag for %s, using fallback", u)
+			text = fallback
+			break
+		}
+	}
+
+	log.Printf("Alert: 24h no-response callout sent for event '%s' to chat %s (%s)", ev.Summary, chatIDStr, names)
+
+	params := &bot.SendMessageParams{ChatID: chatID, Text: text}
+	if ev.MessageID != 0 {
+		params.ReplyParameters = &models.ReplyParameters{MessageID: ev.MessageID}
+	}
+	if m.bot != nil {
+		m.bot.SendMessage(context.Background(), params)
+	}
 }
 
 func (m *Manager) sendReminder(chatIDStr string, ev Event, when string) {

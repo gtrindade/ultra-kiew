@@ -532,6 +532,101 @@ func TestBuildReminderMessageIsEmptyWithNoConfirmedUsers(t *testing.T) {
 	}
 }
 
+func TestNoResponseUsersTreatsMissingAndQuestionMarkTheSame(t *testing.T) {
+	confirmations := map[string]string{"@alice": "❔", "@bob": "💪", "@carol": ""}
+	got := noResponseUsers(confirmations)
+	if len(got) != 2 {
+		t.Fatalf("expected 2 pending users (missing counts the same as ❔), got %v", got)
+	}
+}
+
+// The daily nudge is gated on the GROUP's timezone, not the server's -- same
+// reasoning as event scheduling itself.
+func TestMaybeSendDailyNudgesWaitsForTheDailyHourThenFiresOncePerDay(t *testing.T) {
+	m := NewManager(setupTestStorage(t, ""))
+	loc := mustLoad(t, "America/Sao_Paulo")
+	group := Group{Timezone: "America/Sao_Paulo"}
+
+	ev := &Event{Confirmations: map[string]string{"@alice": "❔"}}
+
+	before9am := time.Date(2026, 8, 24, 8, 59, 0, 0, loc).Unix()
+	if m.maybeSendDailyNudges(ev, group, map[string]int64{}, before9am) {
+		t.Fatal("should not nudge before 9am in the group's timezone")
+	}
+	if ev.LastNoResponseNudgeDate != "" {
+		t.Fatal("should not have recorded a nudge date yet")
+	}
+
+	at9am := time.Date(2026, 8, 24, 9, 0, 0, 0, loc).Unix()
+	if !m.maybeSendDailyNudges(ev, group, map[string]int64{}, at9am) {
+		t.Fatal("expected a nudge at 9am")
+	}
+	if ev.LastNoResponseNudgeDate != "2026-08-24" {
+		t.Fatalf("expected the nudge date to be recorded, got %q", ev.LastNoResponseNudgeDate)
+	}
+
+	laterSameDay := time.Date(2026, 8, 24, 15, 0, 0, 0, loc).Unix()
+	if m.maybeSendDailyNudges(ev, group, map[string]int64{}, laterSameDay) {
+		t.Fatal("should not nudge a second time on the same day")
+	}
+
+	nextDay := time.Date(2026, 8, 25, 9, 0, 0, 0, loc).Unix()
+	if !m.maybeSendDailyNudges(ev, group, map[string]int64{}, nextDay) {
+		t.Fatal("expected a nudge again the next day")
+	}
+}
+
+func TestMaybeSendDailyNudgesNoOpWhenEveryoneResponded(t *testing.T) {
+	m := NewManager(setupTestStorage(t, ""))
+	ev := &Event{Confirmations: map[string]string{"@alice": "💪"}}
+	if m.maybeSendDailyNudges(ev, Group{}, map[string]int64{}, time.Now().Unix()) {
+		t.Fatal("should not nudge when nobody is pending")
+	}
+}
+
+func TestSend24hCalloutIsSafeWithNoBotConfigured(t *testing.T) {
+	m := NewManager(setupTestStorage(t, "America/Sao_Paulo"))
+	chatIDStr := fmt.Sprintf("%d", testGroupChatID)
+
+	// Must not panic whether or not there is anyone to call out, even with
+	// m.bot left nil (no SetBot call, as in every other test here).
+	m.send24hCallout(chatIDStr, Event{Summary: "Test", Confirmations: map[string]string{"@alice": "💪"}})
+	m.send24hCallout(chatIDStr, Event{Summary: "Test", Confirmations: map[string]string{"@alice": "❔"}})
+}
+
+// End-to-end through the real tick: an event 23h59m out with a pending
+// responder must have the callout latch set after one tick, and it must stay
+// set (not refire) on the next.
+func TestRunMonitorTickLatches24hCalloutOnce(t *testing.T) {
+	storageClient := setupTestStorage(t, "America/Sao_Paulo")
+	m := NewManager(storageClient)
+
+	chatIDStr := fmt.Sprintf("%d", testGroupChatID)
+	ev := Event{
+		Date:          "amanhã",
+		Timestamp:     time.Now().Add(23*time.Hour + 59*time.Minute).Unix(),
+		Summary:       "Sessão de teste",
+		Confirmations: map[string]string{"@alice": "💪", "@bob": "❔"},
+	}
+	if err := storageClient.SaveToDB(eventsFileName, map[string]Event{chatIDStr: ev}); err != nil {
+		t.Fatalf("failed to seed event: %v", err)
+	}
+
+	m.runMonitorTick(context.Background())
+
+	events := make(map[string]Event)
+	storageClient.LoadFromDB(eventsFileName, &events)
+	if !events[chatIDStr].Reminder24hCalloutSent {
+		t.Fatal("expected the 24h callout latch to be set after the first tick past the 24h mark")
+	}
+
+	m.runMonitorTick(context.Background())
+	storageClient.LoadFromDB(eventsFileName, &events)
+	if !events[chatIDStr].Reminder24hCalloutSent {
+		t.Fatal("latch should remain set on a later tick")
+	}
+}
+
 func mustLoad(t *testing.T, name string) *time.Location {
 	t.Helper()
 	loc, err := time.LoadLocation(name)
