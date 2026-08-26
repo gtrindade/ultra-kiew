@@ -60,6 +60,21 @@ func NewBot(config *config.Config, ai *googlegenai.Client, storageClient *storag
 	opts := []bot.Option{
 		bot.WithDefaultHandler(c.handler),
 		bot.WithCheckInitTimeout(time.Second * 30),
+		// The library's default is to spawn a new, unsynchronized goroutine
+		// per incoming update. Every event/group tool handler does a plain
+		// load-mutate-save on a JSON file with no locking across that whole
+		// sequence, so two updates landing close together (three quick
+		// create/remove cycles in the same chat, or several people answering
+		// their DM invite around the same moment) can interleave: an older
+		// create() whose SendMessage call happened to take longer can finish
+		// and persist its card's message ID *after* a newer create/remove
+		// already saved -- a plain lost update. That is what "the status was
+		// recorded against the right event, but the card that got edited was
+		// the wrong one" actually was: not a wrong event, a stale MessageID
+		// from a write that landed out of order. This bot serves a handful of
+		// people scheduling RPG sessions; there is no throughput reason to
+		// risk that for concurrency, so updates are processed one at a time.
+		bot.WithNotAsyncHandlers(),
 	}
 
 	if config.TelegramBotToken == "" {

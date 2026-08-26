@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-telegram/bot"
@@ -157,6 +158,21 @@ type Manager struct {
 	bot     *bot.Bot
 	ai      *googlegenai.Client
 	meet    MeetClient
+
+	// mu serializes every read-modify-write against events.json (and the
+	// group/user files touched alongside it) across the two entry points
+	// that touch them: Manage (one call per Telegram update -- create,
+	// remove, get, update_status) and runMonitorTick (one call per minute,
+	// on its own goroutine). Without it, a slow SendMessage call in one
+	// could let its eventual save land after a concurrent call's, silently
+	// reverting the newer state -- observed in production as a status
+	// update landing against the right event but the wrong (stale) card
+	// message ID, from a create() a moment earlier finishing its save out
+	// of order. The Telegram library itself serializes updates against each
+	// other when configured with WithNotAsyncHandlers, but that says
+	// nothing about the independent monitor-tick goroutine, so this covers
+	// both.
+	mu sync.Mutex
 }
 
 func (m *Manager) SetBot(b *bot.Bot) {
@@ -178,6 +194,11 @@ func NewManager(storageClient *storage.Client) *Manager {
 }
 
 func (m *Manager) Manage(args map[string]any) (string, error) {
+	// Serialized against every other Manage call and against runMonitorTick;
+	// see the comment on Manager.mu for why.
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	// See group.Manage: the chat is decided by the code, not the model.
 	callerChatID, ok := args[googlegenai.ArgCallerChatID].(int64)
 	if !ok {
@@ -699,6 +720,11 @@ func (m *Manager) StartEventMonitor(ctx context.Context, checkInterval time.Dura
 }
 
 func (m *Manager) runMonitorTick(ctx context.Context) {
+	// Serialized against every Manage call and against other ticks; see the
+	// comment on Manager.mu for why.
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	events := make(map[string]Event)
 	m.storage.LoadFromDB(eventsFileName, &events)
 
