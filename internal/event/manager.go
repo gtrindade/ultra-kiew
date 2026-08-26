@@ -248,8 +248,64 @@ func (m *Manager) Manage(args map[string]any) (string, error) {
 		}
 		return fmt.Sprintf("The current event is %q on %s.", event.Summary, event.Date), nil
 
+	case "request_responses":
+		return m.requestResponses(chatIDStr, events)
+
 	default:
-		return "", fmt.Errorf("invalid action: %s, must be one of [create, remove, get, update_status]", action)
+		return "", fmt.Errorf("invalid action: %s, must be one of [create, remove, get, update_status, request_responses]", action)
+	}
+}
+
+// requestResponses re-sends the invite DM to whoever has not answered yet,
+// for an event that already exists. This is what someone reaches for instead
+// of removing and recreating the whole event just to re-ping stragglers, or
+// to pick up someone who has since started the bot after being unreachable
+// at creation time.
+func (m *Manager) requestResponses(chatIDStr string, events map[string]Event) (string, error) {
+	event, exists := events[chatIDStr]
+	if !exists {
+		return "No event exists for this chat, so there is nothing to request responses for.", nil
+	}
+
+	pending := noResponseUsers(event.Confirmations)
+	if len(pending) == 0 {
+		return "Everyone has already responded to this event. There is nothing to re-request.", nil
+	}
+
+	if m.bot == nil {
+		return "", fmt.Errorf("internal error: bot is not available")
+	}
+
+	knownUsers := make(map[string]int64)
+	m.storage.LoadFromDB(usersFileName, &knownUsers)
+
+	var messaged, stillMissing []string
+	for _, u := range pending {
+		uid, ok := knownUsers[u]
+		if !ok {
+			stillMissing = append(stillMissing, u)
+			continue
+		}
+		_, err := m.bot.SendMessage(context.Background(), &bot.SendMessageParams{
+			ChatID: uid,
+			Text:   fmt.Sprintf("%q %s. Vai? Se for atrasar, me dê uma estimativa", event.Summary, event.Date),
+		})
+		if err != nil {
+			stillMissing = append(stillMissing, u)
+			continue
+		}
+		messaged = append(messaged, u)
+	}
+
+	log.Printf("Alert: response request re-sent for event %q to %v (still unreachable: %v)", event.Summary, messaged, stillMissing)
+
+	switch {
+	case len(stillMissing) == 0:
+		return fmt.Sprintf("Sent a reminder DM to: %v. Tell the user this briefly.", messaged), nil
+	case len(messaged) == 0:
+		return fmt.Sprintf("Could not reach anyone: %v have not started a DM with the bot yet (or messaging them failed). Tell the user to ask them to message the bot directly first.", stillMissing), nil
+	default:
+		return fmt.Sprintf("Sent a reminder DM to: %v. Could not reach: %v (they have not started a DM with the bot yet). Tell the user both parts honestly.", messaged, stillMissing), nil
 	}
 }
 
@@ -1240,14 +1296,17 @@ CREATING AN EVENT:
 5) The system checks for a past date, an existing event and a missing group, and will tell you. Report what it says honestly; never claim an event was created when the tool said otherwise.
 
 UPDATE_STATUS (only in a private DM, when a user answers their invite):
-Parse their answer as yes / no / late / unsure and call the tool immediately. Do not reply "vou anotar" without calling it. Use 'unsure' when someone who already answered says they're not sure anymore -- it resets them back to unanswered. The system knows who is speaking; you do not pass a username and you cannot answer on anyone elses behalf.`,
+Parse their answer as yes / no / late / unsure and call the tool immediately. Do not reply "vou anotar" without calling it. Use 'unsure' when someone who already answered says they're not sure anymore -- it resets them back to unanswered. The system knows who is speaking; you do not pass a username and you cannot answer on anyone elses behalf.
+
+REQUEST_RESPONSES (only in the group chat, for an event that already exists):
+Use this when the user asks to re-ping, remind, or re-request an answer from whoever has not responded yet -- do NOT remove and recreate the event for this. It re-sends the original invite DM to everyone still unanswered, including anyone who could not be reached before but has since started the bot. Report back exactly what the tool says: who was actually messaged, and who still cannot be reached because they have not started a DM with the bot.`,
 				Parameters: &genai.Schema{
 					Type: "object",
 					Properties: map[string]*genai.Schema{
 						"action": {
 							Type:        "string",
-							Description: "Action to perform: 'create', 'remove', 'get', or 'update_status'",
-							Enum:        []string{"create", "remove", "get", "update_status"},
+							Description: "Action to perform: 'create', 'remove', 'get', 'update_status', or 'request_responses'",
+							Enum:        []string{"create", "remove", "get", "update_status", "request_responses"},
 						},
 						"local_datetime": {
 							Type:        "string",

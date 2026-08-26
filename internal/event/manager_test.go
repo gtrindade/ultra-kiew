@@ -360,6 +360,61 @@ func TestUpdateStatusUnsureResetsToUnanswered(t *testing.T) {
 	}
 }
 
+// request_responses exists so a stale invite (someone who hadn't started the
+// bot yet, or just hasn't answered) can be re-pinged without removing and
+// recreating the whole event.
+func TestRequestResponsesRefusesWithNoEvent(t *testing.T) {
+	m := NewManager(setupTestStorage(t, "America/Sao_Paulo"))
+
+	reply, err := m.Manage(groupArgs(map[string]any{"action": "request_responses"}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(reply, "No event exists") {
+		t.Fatalf("expected a no-event message, got %q", reply)
+	}
+}
+
+func TestRequestResponsesNoOpsWhenEveryoneAlreadyAnswered(t *testing.T) {
+	storageClient := setupTestStorage(t, "America/Sao_Paulo")
+	m := NewManager(storageClient)
+
+	if _, err := m.Manage(groupArgs(map[string]any{
+		"action":         "create",
+		"local_datetime": tomorrowAt(21),
+	})); err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+
+	chatIDStr := fmt.Sprintf("%d", testGroupChatID)
+	events := make(map[string]Event)
+	storageClient.LoadFromDB(eventsFileName, &events)
+	ev := events[chatIDStr]
+	ev.Confirmations["@alice"] = "💪"
+	ev.Confirmations["@bob"] = "🐔"
+	events[chatIDStr] = ev
+	if err := storageClient.SaveToDB(eventsFileName, events); err != nil {
+		t.Fatalf("failed to seed confirmations: %v", err)
+	}
+
+	reply, err := m.Manage(groupArgs(map[string]any{"action": "request_responses"}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(reply, "already responded") {
+		t.Fatalf("expected an already-responded message, got %q", reply)
+	}
+}
+
+func TestRequestResponsesIsRefusedInAGroupOnlyDM(t *testing.T) {
+	m := NewManager(setupTestStorage(t, "America/Sao_Paulo"))
+
+	_, err := m.Manage(dmArgs(map[string]any{"action": "request_responses"}))
+	if err == nil || !strings.Contains(err.Error(), "private DM") {
+		t.Fatalf("expected a refusal outside the group chat, got err=%v", err)
+	}
+}
+
 func TestResolveTimezone(t *testing.T) {
 	for _, tc := range []struct{ in, want string }{
 		{"BRT", "America/Sao_Paulo"},
