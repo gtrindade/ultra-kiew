@@ -62,6 +62,7 @@ func main() {
 
 	eventManager.SetBot(botClient.Bot())
 	eventManager.SetAI(aiClient)
+	groupManager.SetBot(botClient.Bot())
 
 	setUpMeet(ctx, config, eventManager)
 

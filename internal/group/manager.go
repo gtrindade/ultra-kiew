@@ -1,8 +1,10 @@
 package group
 
 import (
+	"context"
 	"fmt"
 
+	"github.com/go-telegram/bot"
 	"github.com/gtrindade/ultra-kiew/internal/googlegenai"
 	"github.com/gtrindade/ultra-kiew/internal/storage"
 	"google.golang.org/genai"
@@ -23,12 +25,17 @@ type Group struct {
 
 type Manager struct {
 	storage *storage.Client
+	bot     *bot.Bot
 }
 
 func NewManager(storageClient *storage.Client) *Manager {
 	return &Manager{
 		storage: storageClient,
 	}
+}
+
+func (m *Manager) SetBot(b *bot.Bot) {
+	m.bot = b
 }
 
 func (m *Manager) Manage(args map[string]any) (string, error) {
@@ -91,20 +98,23 @@ func (m *Manager) Manage(args map[string]any) (string, error) {
 
 		m.storage.MustSave(groupsFileName, groups)
 
-		var missingUsers []string
-		knownUsers := make(map[string]int64)
-		// We only need to check this internally. If it fails, we just assume tracking isn't populated.
-		m.storage.LoadFromDB(usersFileName, &knownUsers)
-		for _, u := range users {
-			if _, exists := knownUsers[u]; !exists {
-				missingUsers = append(missingUsers, u)
-			}
-		}
+		// This used to only ever check knownUsers (do we have a chat ID on
+		// file at all) and return the result as a string for the model to
+		// relay -- and in production, the model sometimes just didn't: a
+		// clean "Feito! Registrei o grupo..." with the missing-user warning
+		// silently dropped, even though this tool had already detected and
+		// returned it. event_manage never had that failure mode, because it
+		// posts its own "could not reach these users" warning directly to the
+		// chat rather than trusting the model to repeat it -- this does the
+		// same. It also tests deliverability for real, by actually attempting
+		// a DM, rather than only trusting that a stored chat ID still works.
+		chatTitle, _ := args[googlegenai.ArgChatTitle].(string)
+		missingUsers := m.notifyNewMembers(chatID, chatTitle, users)
 
 		if len(missingUsers) > 0 {
-			return fmt.Sprintf("Successfully created the group with users: %v.\n\nHowever, the following users have not started the bot yet: %v. Please make sure to ask them to direct message the bot to start it, so it can mention them later. If they already started the bot, tell them to stop and start again.", users, missingUsers), nil
+			return fmt.Sprintf("Successfully created the group with users: %v. The following users have not started the bot yet, and a warning about them has ALREADY been posted to the chat directly -- do not claim you are the one telling the user this, just briefly confirm: %v.", users, missingUsers), nil
 		}
-		return fmt.Sprintf("Successfully created the group with users: %v", users), nil
+		return fmt.Sprintf("Successfully created the group with users: %v. Everyone could be reached by DM.", users), nil
 
 	case "remove":
 		if _, exists := groups[chatIDStr]; !exists {
@@ -133,6 +143,49 @@ func (m *Manager) Manage(args map[string]any) (string, error) {
 	}
 }
 
+// notifyNewMembers actually attempts a "you've been added" DM to every new
+// member, and reports back who could not be reached. If anyone couldn't, it
+// posts that warning to the group chat itself -- directly, not through the
+// model -- so it cannot be silently dropped from a conversational reply.
+func (m *Manager) notifyNewMembers(chatID int64, chatTitle string, users []string) []string {
+	if m.bot == nil {
+		return nil
+	}
+
+	knownUsers := make(map[string]int64)
+	m.storage.LoadFromDB(usersFileName, &knownUsers)
+
+	groupName := chatTitle
+	if groupName == "" {
+		groupName = "o grupo"
+	}
+
+	var missingUsers []string
+	for _, u := range users {
+		uid, exists := knownUsers[u]
+		if !exists {
+			missingUsers = append(missingUsers, u)
+			continue
+		}
+		_, err := m.bot.SendMessage(context.Background(), &bot.SendMessageParams{
+			ChatID: uid,
+			Text:   fmt.Sprintf("Você foi adicionado ao grupo %q! Quando tiver um evento marcado, eu te chamo por aqui para confirmar presença.", groupName),
+		})
+		if err != nil {
+			missingUsers = append(missingUsers, u)
+		}
+	}
+
+	if len(missingUsers) > 0 {
+		m.bot.SendMessage(context.Background(), &bot.SendMessageParams{
+			ChatID: chatID,
+			Text:   fmt.Sprintf("Aviso: Não foi possível enviar uma mensagem direta para os seguintes usuários porque eles ainda não iniciaram este bot: %v. Por favor, peça a eles para me enviarem uma DM para iniciar o bot!", missingUsers),
+		})
+	}
+
+	return missingUsers
+}
+
 func GetToolConfig() *genai.Tool {
 	return &genai.Tool{
 		FunctionDeclarations: []*genai.FunctionDeclaration{
@@ -144,7 +197,8 @@ The chat this applies to is determined automatically by the system. You do not h
 
 There is at most one group per chat; the system enforces this and will tell you if one already exists.
 If the user provides duplicate usernames, do not reject the request; they are deduplicated for you.
-Never claim a group was created or removed unless this tool returned success.`,
+Never claim a group was created or removed unless this tool returned success.
+On 'create', the system itself already DMs every new member and, if any could not be reached, posts that warning directly to the group chat -- you do not need to (and should not) repeat that warning yourself, just confirm briefly.`,
 				Parameters: &genai.Schema{
 					Type: "object",
 					Properties: map[string]*genai.Schema{
