@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -310,6 +311,12 @@ func (m *Manager) create(args map[string]any, chatID int64, chatIDStr string, ev
 		})
 		if err == nil && msg != nil {
 			messageID = msg.ID
+		} else {
+			// Every later update_status edit targets this ID. If it never
+			// got captured, editing is silently skipped forever for this
+			// event (guarded by MessageID != 0 downstream) -- worth a loud
+			// log line rather than a quiet no-op nobody can trace back.
+			log.Printf("Alert: event card for chat %d was not captured (err=%v, msg=%v); card will never be editable for this event", chatID, err, msg)
 		}
 
 		for _, u := range group.Users {
@@ -360,7 +367,7 @@ func (m *Manager) create(args map[string]any, chatID int64, chatIDStr string, ev
 		m.bot.SendMessage(context.Background(), params)
 	}
 
-	log.Printf("Event created for chat %d on %s (%s, tz %s %s)", chatID, date, loc, tzInput, tzSource)
+	log.Printf("Event created for chat %d on %s (%s, tz %s %s), card message ID %d", chatID, date, loc, tzInput, tzSource, messageID)
 
 	return "Event created. The summary card has ALREADY been posted to the chat by the system. Do not describe it, do not repeat the date, do not add emojis. Output exactly '__SILENT__' and nothing else.", nil
 }
@@ -417,12 +424,21 @@ func (m *Manager) updateStatus(args map[string]any, callerChatID int64, isPrivat
 	// Which events this user may answer for is computed here, from storage.
 	// The model may name one when there is more than one, but it can only pick
 	// from this list -- an ID it invents matches nothing and changes nothing.
+	//
+	// Sorted rather than left in map iteration order: Go randomizes that order
+	// on every read, so an ambiguous case (two chats, same summary and date --
+	// which happens when the same group title is reused across test chats)
+	// would otherwise list itself to the model in a different order each
+	// call. The model cannot tell such invites apart by name either way, but
+	// at least the disambiguation prompt itself stays stable run to run
+	// instead of compounding the ambiguity with randomness of our own.
 	var pending []string
 	for chatIDStr, ev := range events {
 		if _, isInvited := ev.Confirmations[username]; isInvited {
 			pending = append(pending, chatIDStr)
 		}
 	}
+	sort.Strings(pending)
 
 	if len(pending) == 0 {
 		return "This user has no event invites to answer right now.", nil
@@ -480,11 +496,22 @@ func (m *Manager) updateStatus(args map[string]any, callerChatID int64, isPrivat
 	m.storage.MustSave(eventsFileName, events)
 
 	if m.bot != nil && event.MessageID != 0 {
-		m.bot.EditMessageText(context.Background(), &bot.EditMessageTextParams{
+		// This used to be fire-and-forget: no error was ever checked or
+		// logged, so a card that silently failed to update (wrong ID, no
+		// permission, rate limited) looked identical to a successful one --
+		// the tool still reported success to the user regardless. Logging
+		// the exact chat/message ID being targeted, plus whatever Telegram
+		// says, is what turns "the card didn't update and nobody knows why"
+		// into something traceable.
+		if _, err := m.bot.EditMessageText(context.Background(), &bot.EditMessageTextParams{
 			ChatID:    groupChatID,
 			MessageID: event.MessageID,
 			Text:      renderEventText(event.Summary, event.Date, groupUsers, event.Confirmations),
-		})
+		}); err != nil {
+			log.Printf("Alert: failed to update event card (chat %s, message %d) for %s's answer on %q: %v", target, event.MessageID, username, event.Summary, err)
+		} else {
+			log.Printf("Event card updated (chat %s, message %d) for %s's answer on %q", target, event.MessageID, username, event.Summary)
+		}
 
 		if announce {
 			m.sendAllRespondedAnnouncement(groupChatID, event, groupUsers)
