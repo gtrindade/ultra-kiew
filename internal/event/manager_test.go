@@ -326,6 +326,40 @@ func TestStatusChangeAfterFullConfirmationIsRecorded(t *testing.T) {
 	}
 }
 
+// 'unsure' walks an answer back to ❔ -- the actual "remove my answer"
+// mechanism, since there is no separate delete-the-confirmation action.
+func TestUpdateStatusUnsureResetsToUnanswered(t *testing.T) {
+	storageClient := setupTestStorage(t, "America/Sao_Paulo")
+	m := NewManager(storageClient)
+	chatIDStr := fmt.Sprintf("%d", testGroupChatID)
+
+	if _, err := m.Manage(groupArgs(map[string]any{
+		"action":         "create",
+		"local_datetime": tomorrowAt(21),
+	})); err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+
+	if _, err := m.Manage(dmArgs(map[string]any{"action": "update_status", "status": "yes"})); err != nil {
+		t.Fatalf("@alice's update_status failed: %v", err)
+	}
+
+	events := make(map[string]Event)
+	storageClient.LoadFromDB(eventsFileName, &events)
+	if events[chatIDStr].Confirmations["@alice"] != "💪" {
+		t.Fatalf("expected @alice confirmed before the reset, got %q", events[chatIDStr].Confirmations["@alice"])
+	}
+
+	if _, err := m.Manage(dmArgs(map[string]any{"action": "update_status", "status": "unsure"})); err != nil {
+		t.Fatalf("@alice's reset to unsure failed: %v", err)
+	}
+
+	storageClient.LoadFromDB(eventsFileName, &events)
+	if got := events[chatIDStr].Confirmations["@alice"]; got != "❔" {
+		t.Fatalf("expected @alice's answer to reset to ❔, got %q", got)
+	}
+}
+
 func TestResolveTimezone(t *testing.T) {
 	for _, tc := range []struct{ in, want string }{
 		{"BRT", "America/Sao_Paulo"},
@@ -646,6 +680,12 @@ func TestConfirmationSeverityRanksCommitmentLevels(t *testing.T) {
 	if confirmationSeverity("❔") != confirmationSeverity("") {
 		t.Error("never-answered and missing should rank the same")
 	}
+	// "unsure" (which resets an answer back to ❔) must rank as equally
+	// negative as an outright "no" -- withdrawing to uncertain after having
+	// confirmed is not a neutral change.
+	if confirmationSeverity("❔") != confirmationSeverity("🐔") {
+		t.Error("unsure (❔) should rank the same as an outright no (🐔)")
+	}
 }
 
 func TestBuildStatusChangeMessageJudgesToneByDirection(t *testing.T) {
@@ -665,6 +705,21 @@ func TestBuildStatusChangeMessageJudgesToneByDirection(t *testing.T) {
 	lateToWorseLate := buildStatusChangeMessage("@bob", "Test Ultra-Kiew", "🐢 (10 min)", "🐔")
 	if !lateToWorseLate.worse {
 		t.Error("late -> absent should be judged as a change for the worse")
+	}
+
+	// "unsure" resets to ❔, which must be judged exactly as negative as an
+	// outright "no" -- withdrawing a confirmation is not neutral.
+	confirmedToUnsure := buildStatusChangeMessage("@bob", "Test Ultra-Kiew", "💪", "❔")
+	if !confirmedToUnsure.worse {
+		t.Error("confirmed -> unsure should be judged as a change for the worse")
+	}
+	if !strings.Contains(confirmedToUnsure.fallback, "incerto") {
+		t.Errorf("expected the fallback to describe the new state as 'incerto', got %q", confirmedToUnsure.fallback)
+	}
+
+	lateToUnsure := buildStatusChangeMessage("@bob", "Test Ultra-Kiew", "🐢", "❔")
+	if !lateToUnsure.worse {
+		t.Error("late -> unsure should be judged as a change for the worse")
 	}
 }
 

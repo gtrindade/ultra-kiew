@@ -435,8 +435,13 @@ func (m *Manager) updateStatus(args map[string]any, callerChatID int64, isPrivat
 		} else {
 			emoji = "🐢"
 		}
+	case "unsure":
+		// Back to unanswered. This exists for someone walking back a previous
+		// yes/no/late -- "actually I'm not sure anymore" -- not for a first
+		// answer, which is just silence until they do answer.
+		emoji = "❔"
 	default:
-		return "", fmt.Errorf("invalid status %q: must be 'yes', 'no' or 'late'", status)
+		return "", fmt.Errorf("invalid status %q: must be 'yes', 'no', 'late', or 'unsure'", status)
 	}
 
 	events := make(map[string]Event)
@@ -683,7 +688,11 @@ func confirmationSeverity(conf string) int {
 		return 2
 	case strings.HasPrefix(conf, "🐢"):
 		return 1
-	case conf == "🐔":
+	case conf == "🐔", conf == "❔", conf == "":
+		// Withdrawing to "unsure" ranks the same as an outright "no": both
+		// leave the roster with one less person actually coming, which is
+		// exactly what a change *from* confirmed or late *to* either one
+		// should be judged as -- a change for the worse, not a neutral one.
 		return 0
 	default:
 		return -1
@@ -703,6 +712,8 @@ func describeConfirmation(conf string) string {
 		return "atrasado"
 	case conf == "🐔":
 		return "não vai"
+	case conf == "❔", conf == "":
+		return "incerto"
 	default:
 		return "sem resposta"
 	}
@@ -1229,7 +1240,7 @@ CREATING AN EVENT:
 5) The system checks for a past date, an existing event and a missing group, and will tell you. Report what it says honestly; never claim an event was created when the tool said otherwise.
 
 UPDATE_STATUS (only in a private DM, when a user answers their invite):
-Parse their answer as yes / no / late and call the tool immediately. Do not reply "vou anotar" without calling it. The system knows who is speaking; you do not pass a username and you cannot answer on anyone elses behalf.`,
+Parse their answer as yes / no / late / unsure and call the tool immediately. Do not reply "vou anotar" without calling it. Use 'unsure' when someone who already answered says they're not sure anymore -- it resets them back to unanswered. The system knows who is speaking; you do not pass a username and you cannot answer on anyone elses behalf.`,
 				Parameters: &genai.Schema{
 					Type: "object",
 					Properties: map[string]*genai.Schema{
@@ -1248,8 +1259,8 @@ Parse their answer as yes / no / late and call the tool immediately. Do not repl
 						},
 						"status": {
 							Type:        "string",
-							Description: "The answer being recorded: 'yes', 'no', or 'late'. Required for update_status.",
-							Enum:        []string{"yes", "no", "late"},
+							Description: "The answer being recorded: 'yes', 'no', 'late', or 'unsure'. 'unsure' resets the answer back to unanswered -- use it when someone walks back a previous yes/no/late and says they're not sure anymore, not for a first answer. Required for update_status.",
+							Enum:        []string{"yes", "no", "late", "unsure"},
 						},
 						"late_time": {
 							Type:        "string",
