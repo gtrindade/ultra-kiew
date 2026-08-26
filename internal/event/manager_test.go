@@ -263,6 +263,69 @@ func TestUpdateStatusIsRefusedInAGroup(t *testing.T) {
 	}
 }
 
+// End-to-end: once both invitees have confirmed (roster fully answered),
+// one of them flip-flopping must be recorded and must NOT be treated as the
+// first-time-completing-the-roster case again (AllRespondedSent already
+// latched). m.bot is nil in tests, so sendStatusChangeUpdate's actual send is
+// a no-op -- what's covered here is that the state transition happens
+// without error and the stored confirmation is the new answer, not silently
+// dropped or reverted.
+func TestStatusChangeAfterFullConfirmationIsRecorded(t *testing.T) {
+	storageClient := setupTestStorage(t, "America/Sao_Paulo")
+	m := NewManager(storageClient)
+	chatIDStr := fmt.Sprintf("%d", testGroupChatID)
+
+	const bobChatID = int64(918273645)
+	users := make(map[string]int64)
+	storageClient.LoadFromDB(usersFileName, &users)
+	users["@bob"] = bobChatID
+	if err := storageClient.SaveToDB(usersFileName, users); err != nil {
+		t.Fatalf("failed to seed @bob's DM chat: %v", err)
+	}
+
+	if _, err := m.Manage(groupArgs(map[string]any{
+		"action":         "create",
+		"local_datetime": tomorrowAt(21),
+	})); err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+
+	bobArgs := func(extra map[string]any) map[string]any {
+		args := map[string]any{
+			googlegenai.ArgCallerChatID: bobChatID,
+			googlegenai.ArgChatTitle:    "",
+			googlegenai.ArgIsPrivate:    true,
+		}
+		for k, v := range extra {
+			args[k] = v
+		}
+		return args
+	}
+
+	if _, err := m.Manage(dmArgs(map[string]any{"action": "update_status", "status": "yes"})); err != nil {
+		t.Fatalf("@alice's update_status failed: %v", err)
+	}
+	if _, err := m.Manage(bobArgs(map[string]any{"action": "update_status", "status": "yes"})); err != nil {
+		t.Fatalf("@bob's update_status failed: %v", err)
+	}
+
+	events := make(map[string]Event)
+	storageClient.LoadFromDB(eventsFileName, &events)
+	if !events[chatIDStr].AllRespondedSent {
+		t.Fatal("expected the roster to be fully confirmed after both answered")
+	}
+
+	// Now @bob flip-flops to "no" -- after the roster was already complete.
+	if _, err := m.Manage(bobArgs(map[string]any{"action": "update_status", "status": "no"})); err != nil {
+		t.Fatalf("@bob's status change failed: %v", err)
+	}
+
+	storageClient.LoadFromDB(eventsFileName, &events)
+	if got := events[chatIDStr].Confirmations["@bob"]; got != "🐔" {
+		t.Fatalf("expected @bob's answer to be updated to 'no' (🐔), got %q", got)
+	}
+}
+
 func TestResolveTimezone(t *testing.T) {
 	for _, tc := range []struct{ in, want string }{
 		{"BRT", "America/Sao_Paulo"},
@@ -567,6 +630,41 @@ func TestCreateSeedsTheNudgeDateSoDailyNudgeWaitsUntilTomorrow(t *testing.T) {
 	tomorrow9am = time.Date(tomorrow9am.Year(), tomorrow9am.Month(), tomorrow9am.Day(), 9, 0, 0, 0, loc)
 	if !m.maybeSendDailyNudges(&ev, Group{Timezone: "America/Sao_Paulo"}, map[string]int64{}, tomorrow9am.Unix()) {
 		t.Fatal("expected a nudge the day after creation")
+	}
+}
+
+func TestConfirmationSeverityRanksCommitmentLevels(t *testing.T) {
+	if confirmationSeverity("💪") <= confirmationSeverity("🐢") {
+		t.Error("confirmed should rank above late")
+	}
+	if confirmationSeverity("🐢") <= confirmationSeverity("🐔") {
+		t.Error("late should rank above absent")
+	}
+	if confirmationSeverity("🐢 (10 min)") != confirmationSeverity("🐢 (20 min)") {
+		t.Error("a changed late-time estimate should not change severity")
+	}
+	if confirmationSeverity("❔") != confirmationSeverity("") {
+		t.Error("never-answered and missing should rank the same")
+	}
+}
+
+func TestBuildStatusChangeMessageJudgesToneByDirection(t *testing.T) {
+	worse := buildStatusChangeMessage("@bob", "Test Ultra-Kiew", "💪", "🐔")
+	if !worse.worse {
+		t.Error("confirmed -> absent should be judged as a change for the worse")
+	}
+	if !strings.Contains(worse.fallback, "@bob") {
+		t.Errorf("expected the fallback to name @bob, got %q", worse.fallback)
+	}
+
+	better := buildStatusChangeMessage("@bob", "Test Ultra-Kiew", "🐔", "💪")
+	if better.worse {
+		t.Error("absent -> confirmed should not be judged as a change for the worse")
+	}
+
+	lateToWorseLate := buildStatusChangeMessage("@bob", "Test Ultra-Kiew", "🐢 (10 min)", "🐔")
+	if !lateToWorseLate.worse {
+		t.Error("late -> absent should be judged as a change for the worse")
 	}
 }
 

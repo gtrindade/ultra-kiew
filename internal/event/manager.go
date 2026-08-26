@@ -489,6 +489,15 @@ func (m *Manager) updateStatus(args map[string]any, callerChatID int64, isPrivat
 	if event.Confirmations == nil {
 		event.Confirmations = make(map[string]string)
 	}
+	// Captured before the overwrite below, and before AllRespondedSent can be
+	// set by this same call, so both reflect the state as it was walking in:
+	// what this user's answer used to be, and whether the roster had already
+	// been fully confirmed at some earlier point. That second one is what
+	// distinguishes "someone answering for the first time, completing the
+	// roster" from "someone flip-flopping after everyone was already locked
+	// in" -- only the latter is a change worth calling out in the group.
+	oldConf := event.Confirmations[username]
+	wasAlreadyFullyConfirmed := event.AllRespondedSent
 	event.Confirmations[username] = emoji
 
 	groups := make(map[string]Group)
@@ -513,6 +522,14 @@ func (m *Manager) updateStatus(args map[string]any, callerChatID int64, isPrivat
 		event.AllRespondedSent = true
 	}
 
+	// A real change: they had answered before (not "❔"/never), and the new
+	// answer actually differs. Comparing raw emoji strings would treat
+	// "🐢 (10 min)" -> "🐢 (20 min)" as a change worth a callout too, which is
+	// just an updated ETA on the same answer, not a flip-flop -- severity is
+	// what actually changed, not the exact string.
+	statusChanged := wasAlreadyFullyConfirmed && oldConf != "" && oldConf != "❔" &&
+		confirmationSeverity(oldConf) != confirmationSeverity(emoji)
+
 	events[target] = event
 	m.storage.MustSave(eventsFileName, events)
 
@@ -536,6 +553,8 @@ func (m *Manager) updateStatus(args map[string]any, callerChatID int64, isPrivat
 
 		if announce {
 			m.sendAllRespondedAnnouncement(groupChatID, event, groupUsers)
+		} else if statusChanged {
+			m.sendStatusChangeUpdate(groupChatID, event, username, oldConf, emoji)
 		}
 	}
 
@@ -654,6 +673,95 @@ Baseie-se EXATAMENTE nesta lista, sem inventar nomes:
 
 // sendAllRespondedAnnouncement fires once, when every invited user has
 // answered.
+// confirmationSeverity ranks a confirmation emoji from most to least
+// committed, so two answers can be compared for "better" or "worse" instead
+// of just "different" -- a late-time estimate changing (🐢 (10 min) -> 🐢 (20
+// min)) is the same commitment, not a flip-flop, and should not read as one.
+func confirmationSeverity(conf string) int {
+	switch {
+	case conf == "💪":
+		return 2
+	case strings.HasPrefix(conf, "🐢"):
+		return 1
+	case conf == "🐔":
+		return 0
+	default:
+		return -1
+	}
+}
+
+// describeConfirmation renders a confirmation emoji as a short Portuguese
+// phrase, for use in prose rather than next to a name on the card.
+func describeConfirmation(conf string) string {
+	switch {
+	case conf == "💪":
+		return "confirmado"
+	case strings.HasPrefix(conf, "🐢"):
+		if suffix := lateSuffix(conf); suffix != "" {
+			return "atrasado " + suffix
+		}
+		return "atrasado"
+	case conf == "🐔":
+		return "não vai"
+	default:
+		return "sem resposta"
+	}
+}
+
+// statusChangeMessage is what buildStatusChangeMessage decides.
+type statusChangeMessage struct {
+	prompt   string
+	fallback string
+	worse    bool
+}
+
+// buildStatusChangeMessage decides the tone for a status-change callout: a
+// flip for the worse (confirmed -> late, anything -> absent) gets a light
+// jab, same as every other flavor message in this file; an improvement is
+// just reported plainly. Pulled out as its own pure function, same as
+// buildAnnouncement and buildReminderMessage, so the tone decision is
+// directly testable without a bot double.
+func buildStatusChangeMessage(username, summary, oldConf, newConf string) statusChangeMessage {
+	oldDesc := describeConfirmation(oldConf)
+	newDesc := describeConfirmation(newConf)
+	worse := confirmationSeverity(newConf) < confirmationSeverity(oldConf)
+
+	var m statusChangeMessage
+	m.worse = worse
+	if worse {
+		m.prompt = fmt.Sprintf("Gere uma mensagem curta com uma cutucada leve e bem-humorada avisando o grupo que %s mudou de ideia sobre a sessão %q: antes estava %q, agora está %q. Não exagere no deboche, é só uma brincadeira leve, e a sessão continua de pé.", username, summary, oldDesc, newDesc)
+		m.fallback = fmt.Sprintf("Atenção! %s mudou de ideia sobre %q: antes %s, agora %s.", username, summary, oldDesc, newDesc)
+	} else {
+		m.prompt = fmt.Sprintf("Gere uma mensagem curta e animada avisando o grupo que %s atualizou a resposta para a sessão %q: antes estava %q, agora está %q.", username, summary, oldDesc, newDesc)
+		m.fallback = fmt.Sprintf("%s atualizou a resposta para %q: antes %s, agora %s.", username, summary, oldDesc, newDesc)
+	}
+	return m
+}
+
+// sendStatusChangeUpdate posts a reply to the event card when someone changes
+// their answer after the roster was already fully confirmed once.
+func (m *Manager) sendStatusChangeUpdate(groupChatID int64, event Event, username, oldConf, newConf string) {
+	sc := buildStatusChangeMessage(username, event.Summary, oldConf, newConf)
+
+	text := m.generateOrFallback(sc.prompt, sc.fallback)
+
+	// Same reasoning as every other flavor message here: the point is naming
+	// this specific person, so verify rather than trust.
+	if !strings.Contains(text, username) {
+		text = sc.fallback
+	}
+
+	params := &bot.SendMessageParams{ChatID: groupChatID, Text: text}
+	if event.MessageID != 0 {
+		params.ReplyParameters = &models.ReplyParameters{MessageID: event.MessageID}
+	}
+	if m.bot != nil {
+		m.bot.SendMessage(context.Background(), params)
+	}
+
+	log.Printf("Alert: status change update sent for %s on event %q (%s -> %s)", username, event.Summary, oldConf, newConf)
+}
+
 func (m *Manager) sendAllRespondedAnnouncement(groupChatID int64, event Event, groupUsers []string) {
 	a := buildAnnouncement(event.Summary, groupUsers, event.Confirmations)
 
