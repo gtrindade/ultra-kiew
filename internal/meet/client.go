@@ -139,6 +139,13 @@ func str(m map[string]any, key string) string {
 func (c *Client) CreateSpace(ctx context.Context) (spaceName, joinURI string, err error) {
 	payload := map[string]any{
 		"config": map[string]any{
+			// OPEN means anyone with the join link gets in directly -- no
+			// knocking, no host admitting them one by one. The players
+			// joining a session are not in the host's Workspace org (there
+			// isn't one, this is a consumer account), so the other access
+			// types would otherwise gate every single join on someone
+			// manually letting them in.
+			"accessType": "OPEN",
 			"artifactConfig": map[string]any{
 				"transcriptionConfig": map[string]any{
 					"autoTranscriptionGeneration": "ON",
@@ -155,11 +162,14 @@ func (c *Client) CreateSpace(ctx context.Context) (spaceName, joinURI string, er
 
 	result, err := c.do(ctx, http.MethodPost, baseURL+"/spaces", payload)
 	if err != nil {
-		// Fall back to a plain space rather than failing outright: a session
-		// with a join link and no auto-transcription is still strictly better
-		// than no Meet integration at all, and manually pressing "Transcribe
+		// Fall back to open access with no auto-transcription rather than
+		// failing outright: a session with a join link that at least doesn't
+		// need someone to admit every player is still strictly better than
+		// no Meet integration at all, and manually pressing "Transcribe
 		// meeting" still produces a transcript later.
-		result, err = c.do(ctx, http.MethodPost, baseURL+"/spaces", map[string]any{})
+		result, err = c.do(ctx, http.MethodPost, baseURL+"/spaces", map[string]any{
+			"config": map[string]any{"accessType": "OPEN"},
+		})
 		if err != nil {
 			return "", "", err
 		}
