@@ -96,12 +96,35 @@ type MeetInfo struct {
 	// meetArtifactPollInterval instead of running on every monitor tick for
 	// the entire meetArtifactMaxWait window.
 	LastArtifactPollAt int64 `json:"last_artifact_poll_at,omitempty"`
+
+	// Participants tracks who Meet has ever reported for this session and
+	// whether they were present as of the last check, so a join or leave can
+	// be detected as a change from that stored state rather than guessed at
+	// fresh every tick.
+	Participants []ParticipantStatus `json:"participants,omitempty"`
+}
+
+// ParticipantStatus is one attendee's presence as of the last check.
+type ParticipantStatus struct {
+	Name        string `json:"name"` // Meet's participant resource name, a stable key
+	DisplayName string `json:"display_name"`
+	Present     bool   `json:"present"`
 }
 
 // segmentIndex finds a segment by record name, or -1.
 func (info *MeetInfo) segmentIndex(recordName string) int {
 	for i := range info.Segments {
 		if info.Segments[i].RecordName == recordName {
+			return i
+		}
+	}
+	return -1
+}
+
+// participantIndex finds a tracked participant by Meet resource name, or -1.
+func (info *MeetInfo) participantIndex(name string) int {
+	for i := range info.Participants {
+		if info.Participants[i].Name == name {
 			return i
 		}
 	}
@@ -115,6 +138,7 @@ type MeetClient interface {
 	ListConferenceRecords(ctx context.Context, spaceName string) ([]meet.ConferenceRecord, error)
 	TranscriptLinks(ctx context.Context, conferenceRecordName string) ([]string, error)
 	SmartNotesLinks(ctx context.Context, conferenceRecordName string) ([]string, error)
+	ListParticipants(ctx context.Context, conferenceRecordName string) ([]meet.Participant, error)
 }
 
 // advanceMeetSession drives one event through everything that happens after
@@ -139,6 +163,13 @@ func (m *Manager) advanceMeetSession(ctx context.Context, chatIDStr string, ev E
 	if !meetInfo.SessionEnded {
 		sessionChanged := m.pollConferenceRecords(ctx, chatIDStr, &meetInfo, ev.Timestamp, now)
 		changed = changed || sessionChanged
+
+		// Only worth checking while the call is actually live -- once the
+		// session has ended there is no one left to notice joining or
+		// leaving, and every participant's last session is closed anyway.
+		if participantsChanged := m.pollParticipants(ctx, chatIDStr, ev, &meetInfo); participantsChanged {
+			changed = true
+		}
 	}
 
 	if !meetInfo.SessionEnded && now-ev.Timestamp >= int64(meetMaxSessionLength.Seconds()) {
@@ -253,6 +284,73 @@ func (m *Manager) pollConferenceRecords(ctx context.Context, chatIDStr string, m
 		meetInfo.SessionEndedAt = now
 		changed = true
 	}
+
+	return changed
+}
+
+// pollParticipants checks who is currently present in any still-open segment
+// of this session, and posts one combined message to the group -- as a reply
+// to the event card -- for every join/leave detected since the last check.
+//
+// Display names come straight from Meet (the person's Google account name),
+// not from the Telegram roster: there is no reliable way to map one to the
+// other, so this can only report a name, never @-mention anyone.
+func (m *Manager) pollParticipants(ctx context.Context, chatIDStr string, ev Event, meetInfo *MeetInfo) (changed bool) {
+	var joined, left []string
+
+	for _, seg := range meetInfo.Segments {
+		if seg.EndTime != "" {
+			continue // this segment already ended; nothing live to check here
+		}
+
+		participants, err := m.meet.ListParticipants(ctx, seg.RecordName)
+		if err != nil {
+			log.Printf("could not list participants for chat %s record %s: %v", chatIDStr, seg.RecordName, err)
+			continue
+		}
+
+		for _, p := range participants {
+			i := meetInfo.participantIndex(p.Name)
+			wasPresent := i != -1 && meetInfo.Participants[i].Present
+
+			if p.Present && !wasPresent {
+				joined = append(joined, p.DisplayName)
+			} else if !p.Present && wasPresent {
+				left = append(left, p.DisplayName)
+			}
+
+			status := ParticipantStatus{Name: p.Name, DisplayName: p.DisplayName, Present: p.Present}
+			if i == -1 {
+				meetInfo.Participants = append(meetInfo.Participants, status)
+				changed = true
+			} else if meetInfo.Participants[i] != status {
+				meetInfo.Participants[i] = status
+				changed = true
+			}
+		}
+	}
+
+	if (len(joined) == 0 && len(left) == 0) || m.bot == nil {
+		return changed
+	}
+
+	var lines []string
+	for _, name := range joined {
+		lines = append(lines, "🟢 "+name+" entrou na call")
+	}
+	for _, name := range left {
+		lines = append(lines, "🔴 "+name+" saiu da call")
+	}
+
+	chatID, err := strconv.ParseInt(chatIDStr, 10, 64)
+	if err != nil {
+		return changed
+	}
+	params := &bot.SendMessageParams{ChatID: chatID, Text: strings.Join(lines, "\n")}
+	if ev.MessageID != 0 {
+		params.ReplyParameters = &models.ReplyParameters{MessageID: ev.MessageID}
+	}
+	m.bot.SendMessage(context.Background(), params)
 
 	return changed
 }

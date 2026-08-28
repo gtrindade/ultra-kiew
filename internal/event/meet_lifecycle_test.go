@@ -25,6 +25,10 @@ type fakeMeet struct {
 	notesLinks          map[string][]string
 	transcriptLinkCalls int
 	notesLinkCalls      int
+
+	participants      map[string][]meet.Participant // by conference record name
+	participantsErr   error
+	participantsCalls int
 }
 
 func (f *fakeMeet) CreateSpace(ctx context.Context) (string, string, error) {
@@ -50,6 +54,14 @@ func (f *fakeMeet) TranscriptLinks(ctx context.Context, recordName string) ([]st
 func (f *fakeMeet) SmartNotesLinks(ctx context.Context, recordName string) ([]string, error) {
 	f.notesLinkCalls++
 	return f.notesLinks[recordName], nil
+}
+
+func (f *fakeMeet) ListParticipants(ctx context.Context, recordName string) ([]meet.Participant, error) {
+	f.participantsCalls++
+	if f.participantsErr != nil {
+		return nil, f.participantsErr
+	}
+	return f.participants[recordName], nil
 }
 
 func newTestManager(t *testing.T, fm *fakeMeet) *Manager {
@@ -494,5 +506,80 @@ func TestFormatSegmentDurationDegradesGracefullyOnBadInput(t *testing.T) {
 				t.Errorf("expected empty string for bad input, got %q", got)
 			}
 		})
+	}
+}
+
+// A participant appearing present for the first time is a join, and must be
+// recorded so the same join is not reported again on the next check.
+func TestPollParticipantsDetectsAJoin(t *testing.T) {
+	recordName := "conferenceRecords/abc"
+	fm := &fakeMeet{participants: map[string][]meet.Participant{
+		recordName: {{Name: "participants/1", DisplayName: "Alice", Present: true}},
+	}}
+	m := newTestManager(t, fm)
+
+	meetInfo := &MeetInfo{Segments: []MeetSegment{{RecordName: recordName}}} // open: no EndTime
+	ev := Event{Summary: "Sessão de teste"}
+
+	changed := m.pollParticipants(context.Background(), "-100", ev, meetInfo)
+	if !changed {
+		t.Fatal("expected a new participant to count as a change")
+	}
+	if len(meetInfo.Participants) != 1 || !meetInfo.Participants[0].Present {
+		t.Fatalf("expected Alice recorded as present, got %+v", meetInfo.Participants)
+	}
+
+	// Polling again with the same state must not report a second "change" --
+	// it is exactly the same information already stored.
+	changed = m.pollParticipants(context.Background(), "-100", ev, meetInfo)
+	if changed {
+		t.Fatal("expected no change on a repeat poll with the same state")
+	}
+}
+
+// A participant who was present and now is not is a leave.
+func TestPollParticipantsDetectsALeave(t *testing.T) {
+	recordName := "conferenceRecords/abc"
+	fm := &fakeMeet{}
+	m := newTestManager(t, fm)
+
+	meetInfo := &MeetInfo{
+		Segments:     []MeetSegment{{RecordName: recordName}},
+		Participants: []ParticipantStatus{{Name: "participants/1", DisplayName: "Alice", Present: true}},
+	}
+	ev := Event{Summary: "Sessão de teste"}
+
+	fm.participants = map[string][]meet.Participant{
+		recordName: {{Name: "participants/1", DisplayName: "Alice", Present: false}},
+	}
+
+	changed := m.pollParticipants(context.Background(), "-100", ev, meetInfo)
+	if !changed {
+		t.Fatal("expected a presence flip to count as a change")
+	}
+	if meetInfo.Participants[0].Present {
+		t.Fatal("expected Alice's stored status to update to not-present")
+	}
+}
+
+// A segment that already ended has nothing live left to check -- polling it
+// would just be asking about a call that is already over.
+func TestPollParticipantsSkipsClosedSegments(t *testing.T) {
+	recordName := "conferenceRecords/abc"
+	fm := &fakeMeet{participants: map[string][]meet.Participant{
+		recordName: {{Name: "participants/1", DisplayName: "Alice", Present: true}},
+	}}
+	m := newTestManager(t, fm)
+
+	meetInfo := &MeetInfo{Segments: []MeetSegment{{RecordName: recordName, EndTime: time.Now().Format(time.RFC3339)}}}
+	ev := Event{Summary: "Sessão de teste"}
+
+	m.pollParticipants(context.Background(), "-100", ev, meetInfo)
+
+	if fm.participantsCalls != 0 {
+		t.Fatalf("expected no participants call for a closed segment, got %d", fm.participantsCalls)
+	}
+	if len(meetInfo.Participants) != 0 {
+		t.Fatalf("expected no participants tracked for a closed segment, got %+v", meetInfo.Participants)
 	}
 }

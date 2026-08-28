@@ -225,3 +225,48 @@ func (c *Client) TranscriptLinks(ctx context.Context, conferenceRecordName strin
 func (c *Client) SmartNotesLinks(ctx context.Context, conferenceRecordName string) ([]string, error) {
 	return c.docsLinks(ctx, fmt.Sprintf("%s/%s/smartNotes", baseURL, conferenceRecordName), "smartNotes")
 }
+
+// Participant is one attendee of a conference record, as of the moment this
+// was fetched.
+type Participant struct {
+	// Name is the participant's resource name (unique per conference record),
+	// used as a stable key -- not for display.
+	Name string
+	// DisplayName is whatever Meet reports: the person's Google account name,
+	// not their Telegram handle. There is no reliable way to map one to the
+	// other, so callers can only report this name, not @-mention anyone.
+	DisplayName string
+	// Present is true if this participant's most recent session has not
+	// ended yet -- the same "no end time means still going" signal used for
+	// conference records themselves, just one level down.
+	Present bool
+}
+
+// ListParticipants returns every participant Meet has ever recorded for this
+// conference record, each with whether their latest session is still open.
+// Someone who left and never came back keeps appearing here with Present
+// false, not removed from the list.
+func (c *Client) ListParticipants(ctx context.Context, conferenceRecordName string) ([]Participant, error) {
+	items, err := c.getAllPages(ctx, fmt.Sprintf("%s/%s/participants?pageSize=100", baseURL, conferenceRecordName), "participants")
+	if err != nil {
+		return nil, err
+	}
+
+	participants := make([]Participant, 0, len(items))
+	for _, item := range items {
+		display := "Desconhecido"
+		if u, ok := item["signedinUser"].(map[string]any); ok && str(u, "displayName") != "" {
+			display = str(u, "displayName")
+		} else if u, ok := item["anonymousUser"].(map[string]any); ok && str(u, "displayName") != "" {
+			display = str(u, "displayName") + " (anônimo)"
+		} else if u, ok := item["phoneUser"].(map[string]any); ok && str(u, "displayName") != "" {
+			display = str(u, "displayName") + " (telefone)"
+		}
+		participants = append(participants, Participant{
+			Name:        str(item, "name"),
+			DisplayName: display,
+			Present:     str(item, "latestEndTime") == "",
+		})
+	}
+	return participants, nil
+}
