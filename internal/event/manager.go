@@ -248,12 +248,107 @@ func (m *Manager) Manage(args map[string]any) (string, error) {
 		}
 		return fmt.Sprintf("The current event is %q on %s.", event.Summary, event.Date), nil
 
+	case "update":
+		return m.update(args, callerChatID, chatIDStr, events)
+
 	case "request_responses":
 		return m.requestResponses(chatIDStr, events)
 
 	default:
 		return "", fmt.Errorf("invalid action: %s, must be one of [create, remove, get, update_status, request_responses]", action)
 	}
+}
+
+// update moves an existing event to a new date/time.
+//
+// Everyone's answer is cleared, because an answer is to a specific date: "sim"
+// to Friday 20:00 is not consent to Saturday 22:00, and carrying it over would
+// quietly turn a stale yes into a confirmed player who never agreed to the new
+// time. Everyone is DMed the new date -- those who had answered because they
+// must answer again, those who hadn't because the thing they were deciding
+// about changed.
+//
+// The card message itself is kept and edited in place rather than reposted, so
+// every reminder, recap and callout that replies to it stays attached to one
+// thread instead of scattering across two cards.
+func (m *Manager) update(args map[string]any, chatID int64, chatIDStr string, events map[string]Event) (string, error) {
+	event, exists := events[chatIDStr]
+	if !exists {
+		return "No event exists for this chat, so there is nothing to update. Tell the user to create one first.", nil
+	}
+
+	groups := make(map[string]Group)
+	m.storage.LoadFromDB(groupsFileName, &groups)
+	group := groups[chatIDStr]
+
+	t, loc, err := resolveEventTime(args, group, "NO CHANGE WAS MADE")
+	if err != nil {
+		return "", err
+	}
+
+	if t.Unix() == event.Timestamp {
+		return fmt.Sprintf("The event is already on %s. NOTHING WAS CHANGED and nobody was messaged. Tell the user it was already at that time.", event.Date), nil
+	}
+
+	oldDate := event.Date
+	event.Date = formatPTBRDate(t)
+	event.Timestamp = t.Unix()
+
+	// Every latch that was about the old date has to reopen, or the new date
+	// silently inherits "already reminded" from a schedule that no longer
+	// exists -- the 12h/1h/now reminders would never fire for the time the
+	// session is actually happening.
+	event.Reminder12HourSent = false
+	event.Reminder1HourSent = false
+	event.ReminderNowSent = false
+	event.AllRespondedSent = false
+	event.Reminder24hCalloutSent = t.Before(time.Now().Add(24 * time.Hour))
+	event.LastNoResponseNudgeDate = time.Now().In(loc).Format("2006-01-02")
+
+	for u := range event.Confirmations {
+		event.Confirmations[u] = "❔"
+	}
+
+	events[chatIDStr] = event
+	m.storage.MustSave(eventsFileName, events)
+
+	knownUsers := make(map[string]int64)
+	m.storage.LoadFromDB(usersFileName, &knownUsers)
+
+	var missingUsers []string
+	if m.bot != nil {
+		if event.MessageID != 0 {
+			if _, err := m.bot.EditMessageText(context.Background(), &bot.EditMessageTextParams{
+				ChatID:    chatID,
+				MessageID: event.MessageID,
+				Text:      renderEventText(event.Summary, event.Date, group.Users, event.Confirmations),
+			}); err != nil {
+				log.Printf("Alert: failed to redraw event card (chat %s, message %d) after a reschedule: %v", chatIDStr, event.MessageID, err)
+			}
+		}
+
+		for _, u := range group.Users {
+			uid, ok := knownUsers[u]
+			if !ok {
+				missingUsers = append(missingUsers, u)
+				continue
+			}
+			_, err := m.bot.SendMessage(context.Background(), &bot.SendMessageParams{
+				ChatID: uid,
+				Text:   fmt.Sprintf("A sessão %q mudou de data: agora é %s (antes era %s). Precisa confirmar de novo -- vai? Se for atrasar, me dê uma estimativa", event.Summary, event.Date, oldDate),
+			})
+			if err != nil {
+				missingUsers = append(missingUsers, u)
+			}
+		}
+	}
+
+	log.Printf("Alert: Event %q rescheduled for chat %s: %s -> %s (unreachable: %v)", event.Summary, chatIDStr, oldDate, event.Date, missingUsers)
+
+	if len(missingUsers) > 0 {
+		return fmt.Sprintf("Event moved from %s to %s. Everyone's answer was cleared and they were asked to confirm again. Could not reach: %v -- they have not started a DM with the bot. Report both parts honestly.", oldDate, event.Date, missingUsers), nil
+	}
+	return fmt.Sprintf("Event moved from %s to %s. Everyone's answer was cleared and they were all asked to confirm again. The card has ALREADY been updated by the system -- just confirm the change briefly.", oldDate, event.Date), nil
 }
 
 // requestResponses re-sends the invite DM to whoever has not answered yet,
@@ -309,6 +404,51 @@ func (m *Manager) requestResponses(chatIDStr string, events map[string]Event) (s
 	}
 }
 
+// resolveEventTime turns the model's wall-clock string plus the group's known
+// timezone into a real instant, refusing anything in the past.
+//
+// failPrefix is what the refusal says nothing happened -- "NO EVENT WAS
+// CREATED" or "NO CHANGE WAS MADE" -- because the one thing worse than
+// refusing is the model reporting the refusal as if it had worked.
+//
+// The timezone comes from the group if we already learned it, and is only
+// asked for once. The previous design asked on every create and tried to
+// police it by making the model quote the users words back -- which the model
+// simply learned to satisfy. Remembering the answer removes the question
+// instead of trying to enforce it.
+func resolveEventTime(args map[string]any, group Group, failPrefix string) (time.Time, *time.Location, error) {
+	localDateTime, _ := args["local_datetime"].(string)
+	if strings.TrimSpace(localDateTime) == "" {
+		return time.Time{}, nil, fmt.Errorf("local_datetime is required, as 'YYYY-MM-DDTHH:MM' in the users own local wall-clock time, with NO timezone offset")
+	}
+
+	tzInput, _ := args["timezone"].(string)
+	if strings.TrimSpace(tzInput) == "" {
+		if group.Timezone == "" {
+			return time.Time{}, nil, fmt.Errorf("%s. This chat has no timezone on record yet. Do not guess it. Reply asking the user: 'Qual o fuso horário? (ex: BRT)' and call this tool again once they answer", failPrefix)
+		}
+		tzInput = group.Timezone
+	}
+
+	loc, err := resolveTimezone(tzInput)
+	if err != nil {
+		return time.Time{}, nil, fmt.Errorf("%v. Ask the user to state the timezone again, e.g. 'BRT'", err)
+	}
+
+	// Parsed in the resolved location, so the offset -- and DST for that
+	// specific date -- is computed rather than supplied.
+	t, err := parseLocalDateTime(localDateTime, loc)
+	if err != nil {
+		return time.Time{}, nil, err
+	}
+
+	if !t.After(time.Now()) {
+		return time.Time{}, nil, fmt.Errorf("%s. %s is in the past. Tell the user that time has already passed and ask what they actually meant", failPrefix, formatPTBRDate(t))
+	}
+
+	return t, loc, nil
+}
+
 func (m *Manager) create(args map[string]any, chatID int64, chatIDStr string, events map[string]Event) (string, error) {
 	if existing, exists := events[chatIDStr]; exists {
 		return fmt.Sprintf("An event already exists on %s (%q). NO NEW EVENT WAS CREATED. Tell the user they must remove that one first.", existing.Date, existing.Summary), nil
@@ -321,40 +461,9 @@ func (m *Manager) create(args map[string]any, chatID int64, chatIDStr string, ev
 		return "No group exists for this chat. A group must be created first (group_manage) before scheduling an event. Ask the user who should be in the group.", nil
 	}
 
-	localDateTime, _ := args["local_datetime"].(string)
-	if strings.TrimSpace(localDateTime) == "" {
-		return "", fmt.Errorf("local_datetime is required, as 'YYYY-MM-DDTHH:MM' in the users own local wall-clock time, with NO timezone offset")
-	}
-
-	// The timezone comes from the group if we already learned it, and is only
-	// asked for once. The previous design asked on every create and tried to
-	// police it by making the model quote the users words back -- which the
-	// model simply learned to satisfy. Remembering the answer removes the
-	// question instead of trying to enforce it.
-	tzInput, _ := args["timezone"].(string)
-	tzSource := "informado"
-	if strings.TrimSpace(tzInput) == "" {
-		if group.Timezone == "" {
-			return "", fmt.Errorf("NO EVENT WAS CREATED. This chat has no timezone on record yet. Do not guess it. Reply asking the user: 'Qual o fuso horário? (ex: BRT)' and call this tool again once they answer")
-		}
-		tzInput = group.Timezone
-		tzSource = "lembrado"
-	}
-
-	loc, err := resolveTimezone(tzInput)
-	if err != nil {
-		return "", fmt.Errorf("%v. Ask the user to state the timezone again, e.g. 'BRT'", err)
-	}
-
-	// Parsed in the resolved location, so the offset -- and DST for that
-	// specific date -- is computed rather than supplied.
-	t, err := parseLocalDateTime(localDateTime, loc)
+	t, loc, err := resolveEventTime(args, group, "NO EVENT WAS CREATED")
 	if err != nil {
 		return "", err
-	}
-
-	if !t.After(time.Now()) {
-		return "", fmt.Errorf("NO EVENT WAS CREATED. %s is in the past. Tell the user that time has already passed and ask what they actually meant", formatPTBRDate(t))
 	}
 
 	summary, ok := args[googlegenai.ArgChatTitle].(string)
@@ -444,7 +553,7 @@ func (m *Manager) create(args map[string]any, chatID int64, chatIDStr string, ev
 		m.bot.SendMessage(context.Background(), params)
 	}
 
-	log.Printf("Event created for chat %d on %s (%s, tz %s %s), card message ID %d", chatID, date, loc, tzInput, tzSource, messageID)
+	log.Printf("Event created for chat %d on %s (tz %s), card message ID %d", chatID, date, loc, messageID)
 
 	return "Event created. The summary card has ALREADY been posted to the chat by the system. Do not describe it, do not repeat the date, do not add emojis. Output exactly '__SILENT__' and nothing else.", nil
 }
@@ -1387,8 +1496,14 @@ CREATING AN EVENT:
 4) Only pass 'timezone' if the user actually named one in this conversation (e.g. "BRT", "horário de Brasília"). Never guess it and never infer it from anything. If the chat already has a timezone on record the system uses that and you do not need to pass it; if it does not, the tool will tell you to ask, and you should ask exactly "Qual o fuso horário? (ex: BRT)".
 5) The system checks for a past date, an existing event and a missing group, and will tell you. Report what it says honestly; never claim an event was created when the tool said otherwise.
 
+BEFORE ANYTHING DESTRUCTIVE OR NOISY:
+'remove' throws the event away, and 'update' clears every answer and DMs the whole group. Both are easy to ask for by accident and annoying to undo. Ask the user to confirm in plain language FIRST, wait for their answer, and only then call the tool. If they have already clearly confirmed in this conversation, just do it -- do not ask twice.
+
 UPDATE_STATUS (only in a private DM, when a user answers their invite):
 Parse their answer as yes / no / late / unsure and call the tool immediately. Do not reply "vou anotar" without calling it. Use 'unsure' when someone who already answered says they're not sure anymore -- it resets them back to unanswered. The system knows who is speaking; you do not pass a username and you cannot answer on anyone elses behalf.
+
+UPDATE (only in the group chat, to move an existing event to a new date/time):
+This CLEARS everyone's answer and DMs every single member asking them to confirm again, because an answer was to the old date. That is a lot of messages, so ASK THE USER TO CONFIRM the new date before calling it, and do not call it twice for the same request. Give 'local_datetime' exactly as for 'create'.
 
 REQUEST_RESPONSES (only in the group chat, for an event that already exists):
 Use this when the user asks to re-ping, remind, or re-request an answer from whoever has not responded yet -- do NOT remove and recreate the event for this. It re-sends the original invite DM to everyone still unanswered, including anyone who could not be reached before but has since started the bot. Report back exactly what the tool says: who was actually messaged, and who still cannot be reached because they have not started a DM with the bot.`,
@@ -1397,12 +1512,12 @@ Use this when the user asks to re-ping, remind, or re-request an answer from who
 					Properties: map[string]*genai.Schema{
 						"action": {
 							Type:        "string",
-							Description: "Action to perform: 'create', 'remove', 'get', 'update_status', or 'request_responses'",
-							Enum:        []string{"create", "remove", "get", "update_status", "request_responses"},
+							Description: "Action to perform: 'create', 'update', 'remove', 'get', 'update_status', or 'request_responses'",
+							Enum:        []string{"create", "update", "remove", "get", "update_status", "request_responses"},
 						},
 						"local_datetime": {
 							Type:        "string",
-							Description: "The event date and time as the user would say it on a wall clock: 'YYYY-MM-DDTHH:MM'. NO timezone offset, no 'Z'. Required for 'create'.",
+							Description: "The event date and time as the user would say it on a wall clock: 'YYYY-MM-DDTHH:MM'. NO timezone offset, no 'Z'. Required for 'create' and 'update'.",
 						},
 						"timezone": {
 							Type:        "string",

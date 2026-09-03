@@ -415,6 +415,160 @@ func TestRequestResponsesIsRefusedInAGroupOnlyDM(t *testing.T) {
 	}
 }
 
+// Rescheduling clears every answer: "sim" to Friday 20:00 is not consent to
+// Saturday 22:00, and carrying it over would turn a stale yes into a
+// confirmed player who never agreed to the new time.
+func TestUpdateClearsEveryAnswerAndReopensTheReminders(t *testing.T) {
+	storageClient := setupTestStorage(t, "America/Sao_Paulo")
+	m := NewManager(storageClient)
+	chatIDStr := fmt.Sprintf("%d", testGroupChatID)
+
+	if _, err := m.Manage(groupArgs(map[string]any{
+		"action":         "create",
+		"local_datetime": tomorrowAt(21),
+	})); err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+
+	// Everyone answered, and the reminders for the old date already fired.
+	events := make(map[string]Event)
+	storageClient.LoadFromDB(eventsFileName, &events)
+	ev := events[chatIDStr]
+	ev.Confirmations["@alice"] = "💪"
+	ev.Confirmations["@bob"] = "🐢 (10 min)"
+	ev.AllRespondedSent = true
+	ev.Reminder12HourSent = true
+	ev.Reminder1HourSent = true
+	ev.Reminder24hCalloutSent = true
+	events[chatIDStr] = ev
+	if err := storageClient.SaveToDB(eventsFileName, events); err != nil {
+		t.Fatalf("failed to seed: %v", err)
+	}
+
+	loc := mustLoad(t, "America/Sao_Paulo")
+	newTime := time.Now().Add(72 * time.Hour).In(loc)
+	reply, err := m.Manage(groupArgs(map[string]any{
+		"action":         "update",
+		"local_datetime": newTime.Format("2006-01-02T15:04"),
+	}))
+	if err != nil {
+		t.Fatalf("update failed: %v", err)
+	}
+	if !strings.Contains(reply, "moved from") {
+		t.Fatalf("expected the reply to report the move, got %q", reply)
+	}
+
+	storageClient.LoadFromDB(eventsFileName, &events)
+	got := events[chatIDStr]
+
+	if got.Timestamp != newTime.Truncate(time.Minute).Unix() {
+		t.Fatalf("expected the timestamp to move to the new time, got %d", got.Timestamp)
+	}
+	for user, conf := range got.Confirmations {
+		if conf != "❔" {
+			t.Errorf("expected %s's answer cleared, got %q", user, conf)
+		}
+	}
+	// Latches about the old date must reopen, or the reminders would never
+	// fire for the date the session is actually on now.
+	if got.Reminder12HourSent || got.Reminder1HourSent || got.ReminderNowSent {
+		t.Error("expected the reminder latches to reopen for the new date")
+	}
+	if got.AllRespondedSent {
+		t.Error("expected the all-responded latch to reopen")
+	}
+	if got.Reminder24hCalloutSent {
+		t.Error("expected the 24h callout to reopen for a date more than 24h out")
+	}
+}
+
+func TestUpdateRefusesWithNoEvent(t *testing.T) {
+	m := NewManager(setupTestStorage(t, "America/Sao_Paulo"))
+
+	reply, err := m.Manage(groupArgs(map[string]any{
+		"action":         "update",
+		"local_datetime": tomorrowAt(21),
+	}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(reply, "No event exists") {
+		t.Fatalf("expected a no-event message, got %q", reply)
+	}
+}
+
+// Re-sending the same date must not clear answers or spam anyone.
+func TestUpdateToTheSameTimeChangesNothing(t *testing.T) {
+	storageClient := setupTestStorage(t, "America/Sao_Paulo")
+	m := NewManager(storageClient)
+	chatIDStr := fmt.Sprintf("%d", testGroupChatID)
+
+	when := tomorrowAt(21)
+	if _, err := m.Manage(groupArgs(map[string]any{
+		"action":         "create",
+		"local_datetime": when,
+	})); err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+
+	events := make(map[string]Event)
+	storageClient.LoadFromDB(eventsFileName, &events)
+	ev := events[chatIDStr]
+	ev.Confirmations["@alice"] = "💪"
+	events[chatIDStr] = ev
+	if err := storageClient.SaveToDB(eventsFileName, events); err != nil {
+		t.Fatalf("failed to seed: %v", err)
+	}
+
+	reply, err := m.Manage(groupArgs(map[string]any{
+		"action":         "update",
+		"local_datetime": when,
+	}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(reply, "NOTHING WAS CHANGED") {
+		t.Fatalf("expected a no-op reply, got %q", reply)
+	}
+
+	storageClient.LoadFromDB(eventsFileName, &events)
+	if got := events[chatIDStr].Confirmations["@alice"]; got != "💪" {
+		t.Fatalf("expected @alice's answer left alone on a no-op, got %q", got)
+	}
+}
+
+func TestUpdateRejectsAPastDate(t *testing.T) {
+	m := NewManager(setupTestStorage(t, "America/Sao_Paulo"))
+
+	if _, err := m.Manage(groupArgs(map[string]any{
+		"action":         "create",
+		"local_datetime": tomorrowAt(21),
+	})); err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+
+	past := time.Now().In(mustLoad(t, "America/Sao_Paulo")).Add(-2 * time.Hour)
+	_, err := m.Manage(groupArgs(map[string]any{
+		"action":         "update",
+		"local_datetime": past.Format("2006-01-02T15:04"),
+	}))
+	if err == nil || !strings.Contains(err.Error(), "NO CHANGE WAS MADE") {
+		t.Fatalf("expected a past-date refusal naming that nothing changed, got err=%v", err)
+	}
+}
+
+func TestUpdateIsRefusedInADM(t *testing.T) {
+	m := NewManager(setupTestStorage(t, "America/Sao_Paulo"))
+
+	_, err := m.Manage(dmArgs(map[string]any{
+		"action":         "update",
+		"local_datetime": tomorrowAt(21),
+	}))
+	if err == nil || !strings.Contains(err.Error(), "private DM") {
+		t.Fatalf("expected a refusal outside the group chat, got err=%v", err)
+	}
+}
+
 // SyncGroupMembers is what the group manager calls when its roster changes,
 // instead of writing events.json itself.
 func TestSyncGroupMembersAddsNewcomersAsUnanswered(t *testing.T) {
