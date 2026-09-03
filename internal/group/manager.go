@@ -341,8 +341,8 @@ If the user provides duplicate usernames, do not reject the request; they are de
 Never claim a group was created or removed unless this tool returned success.
 On 'create' and 'add_users', the system itself already DMs every new member and, if any could not be reached, posts that warning directly to the group chat -- you do not need to (and should not) repeat that warning yourself, just confirm briefly.
 
-CONFIRM FIRST, but ONLY for 'remove', 'remove_users' and 'add_users':
-'remove' deletes the whole group; the other two change who gets pinged from then on. State what it will do, wait for the user to actually answer, then call the tool. If they have already clearly confirmed in this conversation, just do it -- do not ask twice. Never do this for 'create' or 'list': creating is what they just asked for, and listing changes nothing.
+CONFIRM FIRST, but ONLY for 'remove' and 'remove_users':
+'remove' deletes the whole group; 'remove_users' takes someone off it, and their answer on the event card goes with them. State what it will do, wait for the user to actually answer, then call the tool. If they have already clearly confirmed in this conversation, just do it -- do not ask twice. Never do this for 'create', 'add_users' or 'list': the first two only message the people being added, which is the point of the action, and listing changes nothing.
 
 Use 'add_users'/'remove_users' to change who is in an existing group -- do NOT remove and recreate the whole group for that. Pass ONLY the people being added or removed in 'users', never the full roster. If the chat has an upcoming event, its card is updated to match automatically: people added show up on it as still unanswered, people removed disappear from it. Report what the tool says about that; do not claim an event was changed if it says nothing about one.`,
 				Parameters: &genai.Schema{
