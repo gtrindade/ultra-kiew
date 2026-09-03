@@ -622,6 +622,98 @@ func (m *Manager) updateStatus(args map[string]any, callerChatID int64, isPrivat
 	return fmt.Sprintf("Recorded %s as %q for %q. Confirm this back to the user briefly.", username, status, event.Summary), nil
 }
 
+// SyncGroupMembers brings the chat's upcoming event in line with a changed
+// group roster: newly added members appear on the card as unanswered, removed
+// members disappear from it, and the card is redrawn.
+//
+// This lives here, rather than in the group package where the roster change
+// originates, for one specific reason: events.json is guarded by this
+// manager's mutex, and a second writer reaching into that file on its own
+// would reintroduce exactly the lost-update race that mutex was added to
+// close. The group manager calls this instead of touching events.json itself.
+//
+// Only the upcoming event is synced. A session already under way (in
+// live_sessions.json) keeps the roster it actually ran with -- rewriting who
+// was invited to something that already happened would be falsifying the
+// record, not correcting it.
+func (m *Manager) SyncGroupMembers(chatIDStr string, users []string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	events := make(map[string]Event)
+	m.storage.LoadFromDB(eventsFileName, &events)
+
+	event, exists := events[chatIDStr]
+	if !exists {
+		return "", nil // no upcoming event for this chat; nothing to sync
+	}
+
+	if event.Confirmations == nil {
+		event.Confirmations = make(map[string]string)
+	}
+
+	inGroup := make(map[string]bool, len(users))
+	for _, u := range users {
+		inGroup[u] = true
+	}
+
+	var added, removed []string
+	for _, u := range users {
+		if _, already := event.Confirmations[u]; !already {
+			event.Confirmations[u] = "❔"
+			added = append(added, u)
+		}
+	}
+	for u := range event.Confirmations {
+		if !inGroup[u] {
+			delete(event.Confirmations, u)
+			removed = append(removed, u)
+		}
+	}
+
+	if len(added) == 0 && len(removed) == 0 {
+		return "", nil
+	}
+	sort.Strings(added)
+	sort.Strings(removed)
+
+	// Someone new who has not answered means the roster is no longer fully
+	// answered, so the "everyone's in" announcement becomes available again
+	// -- it should fire when this new person completes the roster, not stay
+	// latched shut from the previous roster's completion.
+	if len(added) > 0 {
+		event.AllRespondedSent = false
+	}
+
+	events[chatIDStr] = event
+	m.storage.MustSave(eventsFileName, events)
+
+	if m.bot != nil && event.MessageID != 0 {
+		groupChatID, err := strconv.ParseInt(chatIDStr, 10, 64)
+		if err != nil {
+			return "", fmt.Errorf("internal error: corrupt event key %q", chatIDStr)
+		}
+		if _, err := m.bot.EditMessageText(context.Background(), &bot.EditMessageTextParams{
+			ChatID:    groupChatID,
+			MessageID: event.MessageID,
+			Text:      renderEventText(event.Summary, event.Date, users, event.Confirmations),
+		}); err != nil {
+			log.Printf("Alert: failed to redraw event card (chat %s, message %d) after a roster change: %v", chatIDStr, event.MessageID, err)
+		}
+	}
+
+	log.Printf("Event %q roster synced for chat %s (added: %v, removed: %v)", event.Summary, chatIDStr, added, removed)
+
+	switch {
+	case len(removed) == 0:
+		return fmt.Sprintf("The upcoming event %q was updated: %v added to the card as still unanswered.", event.Summary, added), nil
+	case len(added) == 0:
+		return fmt.Sprintf("The upcoming event %q was updated: %v removed from the card.", event.Summary, removed), nil
+	default:
+		return fmt.Sprintf("The upcoming event %q was updated: %v added as still unanswered, %v removed.", event.Summary, added, removed), nil
+	}
+}
+
 func renderEventText(summary, date string, users []string, confirmations map[string]string) string {
 	text := fmt.Sprintf("%s - %s\n\n", summary, date)
 	for _, u := range users {

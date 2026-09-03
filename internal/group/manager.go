@@ -23,9 +23,20 @@ type Group struct {
 	Timezone string `json:"timezone,omitempty"`
 }
 
+// EventSyncer brings a chat's upcoming event in line with a roster change.
+//
+// Declared here, and satisfied by *event.Manager, specifically so this package
+// never writes events.json itself: that file is guarded by the event manager's
+// mutex, and a second writer reaching into it directly would reintroduce the
+// lost-update race that mutex exists to close.
+type EventSyncer interface {
+	SyncGroupMembers(chatIDStr string, users []string) (string, error)
+}
+
 type Manager struct {
 	storage *storage.Client
 	bot     *bot.Bot
+	events  EventSyncer
 }
 
 func NewManager(storageClient *storage.Client) *Manager {
@@ -36,6 +47,13 @@ func NewManager(storageClient *storage.Client) *Manager {
 
 func (m *Manager) SetBot(b *bot.Bot) {
 	m.bot = b
+}
+
+// SetEventSyncer wires in whatever keeps events in step with the roster.
+// Leaving it unset is supported: roster changes then simply do not touch any
+// event, rather than failing.
+func (m *Manager) SetEventSyncer(events EventSyncer) {
+	m.events = events
 }
 
 func (m *Manager) Manage(args map[string]any) (string, error) {
@@ -54,8 +72,11 @@ func (m *Manager) Manage(args map[string]any) (string, error) {
 		return "", fmt.Errorf("invalid argument: action is required")
 	}
 
-	if isPrivate && (action == "create" || action == "remove") {
-		return "", fmt.Errorf("this action is only allowed inside the group chat itself, and this is a private DM. Tell the user to go to the group chat to do it")
+	switch action {
+	case "create", "remove", "add_users", "remove_users":
+		if isPrivate {
+			return "", fmt.Errorf("this action is only allowed inside the group chat itself, and this is a private DM. Tell the user to go to the group chat to do it")
+		}
 	}
 
 	groups := make(map[string]Group)
@@ -65,24 +86,9 @@ func (m *Manager) Manage(args map[string]any) (string, error) {
 
 	switch action {
 	case "create":
-		usersRaw, ok := args["users"].([]any)
-		if !ok {
-			return "", fmt.Errorf("invalid argument: users is required for create action and must be a list of strings")
-		}
-
-		var users []string
-		seen := make(map[string]bool)
-		for _, u := range usersRaw {
-			if str, ok := u.(string); ok {
-				if !seen[str] {
-					seen[str] = true
-					users = append(users, str)
-				}
-			}
-		}
-
-		if len(users) == 0 {
-			return "", fmt.Errorf("no valid usernames were given. Ask the user which people should be in the group, as @usernames")
+		users, err := usersArg(args)
+		if err != nil {
+			return "", err
 		}
 
 		// One group per chat, enforced here rather than only in the prompt.
@@ -116,6 +122,98 @@ func (m *Manager) Manage(args map[string]any) (string, error) {
 		}
 		return fmt.Sprintf("Successfully created the group with users: %v. Everyone could be reached by DM.", users), nil
 
+	case "add_users":
+		group, exists := groups[chatIDStr]
+		if !exists || len(group.Users) == 0 {
+			return "No group exists for this chat yet, so there is nobody to add to. Create the group first.", nil
+		}
+
+		users, err := usersArg(args)
+		if err != nil {
+			return "", err
+		}
+
+		existing := make(map[string]bool, len(group.Users))
+		for _, u := range group.Users {
+			existing[u] = true
+		}
+
+		var added, alreadyThere []string
+		for _, u := range users {
+			if existing[u] {
+				alreadyThere = append(alreadyThere, u)
+				continue
+			}
+			existing[u] = true
+			group.Users = append(group.Users, u)
+			added = append(added, u)
+		}
+
+		if len(added) == 0 {
+			return fmt.Sprintf("Nothing to do: %v are already in the group. The group is unchanged: %v.", alreadyThere, group.Users), nil
+		}
+
+		groups[chatIDStr] = group
+		m.storage.MustSave(groupsFileName, groups)
+
+		chatTitle, _ := args[googlegenai.ArgChatTitle].(string)
+		missingUsers := m.notifyNewMembers(chatID, chatTitle, added)
+		eventNote := m.syncEvent(chatIDStr, group.Users)
+
+		reply := fmt.Sprintf("Added %v to the group. It now has: %v.", added, group.Users)
+		if len(alreadyThere) > 0 {
+			reply += fmt.Sprintf(" Already there, so skipped: %v.", alreadyThere)
+		}
+		if len(missingUsers) > 0 {
+			reply += fmt.Sprintf(" These have not started the bot, and a warning about them has ALREADY been posted to the chat directly -- do not repeat it yourself: %v.", missingUsers)
+		}
+		return reply + eventNote, nil
+
+	case "remove_users":
+		group, exists := groups[chatIDStr]
+		if !exists || len(group.Users) == 0 {
+			return "No group exists for this chat yet, so there is nobody to remove.", nil
+		}
+
+		users, err := usersArg(args)
+		if err != nil {
+			return "", err
+		}
+
+		toRemove := make(map[string]bool, len(users))
+		for _, u := range users {
+			toRemove[u] = true
+		}
+
+		var kept, removed []string
+		for _, u := range group.Users {
+			if toRemove[u] {
+				removed = append(removed, u)
+				continue
+			}
+			kept = append(kept, u)
+		}
+
+		if len(removed) == 0 {
+			return fmt.Sprintf("Nothing to do: none of %v are in the group. It still has: %v.", users, group.Users), nil
+		}
+
+		// Emptying the roster this way would leave a group that no event can
+		// ever be scheduled against, which is what 'remove' is for -- and
+		// 'remove' deliberately refuses while an event is still active.
+		// Draining it member by member must not become a way around that.
+		if len(kept) == 0 {
+			return fmt.Sprintf("That would remove everyone from the group, leaving it empty. Nothing was changed. Tell the user to use the remove action to delete the group instead: %v.", group.Users), nil
+		}
+
+		group.Users = kept
+		groups[chatIDStr] = group
+		m.storage.MustSave(groupsFileName, groups)
+
+		eventNote := m.syncEvent(chatIDStr, group.Users)
+
+		return fmt.Sprintf("Removed %v from the group. It now has: %v.%s", removed, kept, eventNote), nil
+
 	case "remove":
 		if _, exists := groups[chatIDStr]; !exists {
 			return "No group exists for this chat, so there was nothing to remove.", nil
@@ -139,8 +237,51 @@ func (m *Manager) Manage(args map[string]any) (string, error) {
 		return fmt.Sprintf("The group for this chat has users: %v", group.Users), nil
 
 	default:
-		return "", fmt.Errorf("invalid action: %s, must be one of [create, remove, list]", action)
+		return "", fmt.Errorf("invalid action: %s, must be one of [create, remove, list, add_users, remove_users]", action)
 	}
+}
+
+// usersArg pulls the deduplicated @usernames out of a tool call. Shared by
+// every action that takes a roster, so "the model sent the same name twice"
+// is handled identically everywhere rather than only where someone
+// remembered to.
+func usersArg(args map[string]any) ([]string, error) {
+	usersRaw, ok := args["users"].([]any)
+	if !ok {
+		return nil, fmt.Errorf("invalid argument: users is required for this action and must be a list of strings")
+	}
+
+	var users []string
+	seen := make(map[string]bool)
+	for _, u := range usersRaw {
+		if s, ok := u.(string); ok && !seen[s] {
+			seen[s] = true
+			users = append(users, s)
+		}
+	}
+
+	if len(users) == 0 {
+		return nil, fmt.Errorf("no valid usernames were given. Ask the user which people this should apply to, as @usernames")
+	}
+	return users, nil
+}
+
+// syncEvent asks whoever owns events.json to bring the chat's upcoming event
+// in line with the new roster, and renders whatever it reports as a sentence
+// to append to the reply. Returns "" when there is no syncer wired in or no
+// event to update -- in both cases there is simply nothing extra to say.
+func (m *Manager) syncEvent(chatIDStr string, users []string) string {
+	if m.events == nil {
+		return ""
+	}
+	note, err := m.events.SyncGroupMembers(chatIDStr, users)
+	if err != nil {
+		return fmt.Sprintf(" The group changed, but the upcoming event could not be updated to match: %v. Say so plainly.", err)
+	}
+	if note == "" {
+		return ""
+	}
+	return " " + note
 }
 
 // notifyNewMembers actually attempts a "you've been added" DM to every new
@@ -191,25 +332,27 @@ func GetToolConfig() *genai.Tool {
 		FunctionDeclarations: []*genai.FunctionDeclaration{
 			{
 				Name: GroupManageToolName,
-				Description: `Manages the group of users for the current chat. Can create a group with a list of users, remove the group, or list its users.
+				Description: `Manages the group of users for the current chat: create it with a list of users, add or remove individual members, remove the whole group, or list its users.
 
 The chat this applies to is determined automatically by the system. You do not have a chat ID and must never ask the user for one.
 
 There is at most one group per chat; the system enforces this and will tell you if one already exists.
 If the user provides duplicate usernames, do not reject the request; they are deduplicated for you.
 Never claim a group was created or removed unless this tool returned success.
-On 'create', the system itself already DMs every new member and, if any could not be reached, posts that warning directly to the group chat -- you do not need to (and should not) repeat that warning yourself, just confirm briefly.`,
+On 'create' and 'add_users', the system itself already DMs every new member and, if any could not be reached, posts that warning directly to the group chat -- you do not need to (and should not) repeat that warning yourself, just confirm briefly.
+
+Use 'add_users'/'remove_users' to change who is in an existing group -- do NOT remove and recreate the whole group for that. Pass ONLY the people being added or removed in 'users', never the full roster. If the chat has an upcoming event, its card is updated to match automatically: people added show up on it as still unanswered, people removed disappear from it. Report what the tool says about that; do not claim an event was changed if it says nothing about one.`,
 				Parameters: &genai.Schema{
 					Type: "object",
 					Properties: map[string]*genai.Schema{
 						"action": {
 							Type:        "string",
-							Description: "Action to perform: 'create', 'remove', or 'list'",
-							Enum:        []string{"create", "remove", "list"},
+							Description: "Action to perform: 'create', 'remove', 'list', 'add_users', or 'remove_users'",
+							Enum:        []string{"create", "remove", "list", "add_users", "remove_users"},
 						},
 						"users": {
 							Type:        "array",
-							Description: "List of user names (e.g. ['@alice', '@bob']) to include in the group. Required for 'create' action. If the user says 'everyone in this chat', use the @usernames you can see in the conversation context.",
+							Description: "List of user names (e.g. ['@alice', '@bob']). Required for 'create' (the full roster), 'add_users' (only the people being added), and 'remove_users' (only the people being removed). If the user says 'everyone in this chat', use the @usernames you can see in the conversation context.",
 							Items: &genai.Schema{
 								Type: "string",
 							},

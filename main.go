@@ -63,6 +63,10 @@ func main() {
 	eventManager.SetBot(botClient.Bot())
 	eventManager.SetAI(aiClient)
 	groupManager.SetBot(botClient.Bot())
+	// Roster changes go through the event manager rather than writing
+	// events.json directly, so they stay behind the same mutex as everything
+	// else that touches it.
+	groupManager.SetEventSyncer(eventManager)
 
 	setUpMeet(ctx, config, eventManager)
 

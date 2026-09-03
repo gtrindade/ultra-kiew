@@ -415,6 +415,130 @@ func TestRequestResponsesIsRefusedInAGroupOnlyDM(t *testing.T) {
 	}
 }
 
+// SyncGroupMembers is what the group manager calls when its roster changes,
+// instead of writing events.json itself.
+func TestSyncGroupMembersAddsNewcomersAsUnanswered(t *testing.T) {
+	storageClient := setupTestStorage(t, "America/Sao_Paulo")
+	m := NewManager(storageClient)
+	chatIDStr := fmt.Sprintf("%d", testGroupChatID)
+
+	if _, err := m.Manage(groupArgs(map[string]any{
+		"action":         "create",
+		"local_datetime": tomorrowAt(21),
+	})); err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+
+	note, err := m.SyncGroupMembers(chatIDStr, []string{"@alice", "@bob", "@carol"})
+	if err != nil {
+		t.Fatalf("sync failed: %v", err)
+	}
+	if !strings.Contains(note, "@carol") {
+		t.Fatalf("expected the note to mention the added user, got %q", note)
+	}
+
+	events := make(map[string]Event)
+	storageClient.LoadFromDB(eventsFileName, &events)
+	if got := events[chatIDStr].Confirmations["@carol"]; got != "❔" {
+		t.Fatalf("expected @carol added to the card as unanswered, got %q", got)
+	}
+}
+
+func TestSyncGroupMembersDropsRemovedMembers(t *testing.T) {
+	storageClient := setupTestStorage(t, "America/Sao_Paulo")
+	m := NewManager(storageClient)
+	chatIDStr := fmt.Sprintf("%d", testGroupChatID)
+
+	if _, err := m.Manage(groupArgs(map[string]any{
+		"action":         "create",
+		"local_datetime": tomorrowAt(21),
+	})); err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+
+	if _, err := m.SyncGroupMembers(chatIDStr, []string{"@alice"}); err != nil {
+		t.Fatalf("sync failed: %v", err)
+	}
+
+	events := make(map[string]Event)
+	storageClient.LoadFromDB(eventsFileName, &events)
+	confs := events[chatIDStr].Confirmations
+	if _, still := confs["@bob"]; still {
+		t.Fatalf("expected @bob dropped from the card, got %v", confs)
+	}
+	if _, kept := confs["@alice"]; !kept {
+		t.Fatalf("expected @alice kept on the card, got %v", confs)
+	}
+}
+
+// Adding someone who has not answered means the roster is no longer complete,
+// so the "everyone's in" announcement must become available again rather than
+// staying latched shut from the previous roster.
+func TestSyncGroupMembersReopensTheAllRespondedAnnouncement(t *testing.T) {
+	storageClient := setupTestStorage(t, "America/Sao_Paulo")
+	m := NewManager(storageClient)
+	chatIDStr := fmt.Sprintf("%d", testGroupChatID)
+
+	if _, err := m.Manage(groupArgs(map[string]any{
+		"action":         "create",
+		"local_datetime": tomorrowAt(21),
+	})); err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+
+	events := make(map[string]Event)
+	storageClient.LoadFromDB(eventsFileName, &events)
+	ev := events[chatIDStr]
+	ev.AllRespondedSent = true
+	events[chatIDStr] = ev
+	if err := storageClient.SaveToDB(eventsFileName, events); err != nil {
+		t.Fatalf("failed to seed: %v", err)
+	}
+
+	if _, err := m.SyncGroupMembers(chatIDStr, []string{"@alice", "@bob", "@carol"}); err != nil {
+		t.Fatalf("sync failed: %v", err)
+	}
+
+	storageClient.LoadFromDB(eventsFileName, &events)
+	if events[chatIDStr].AllRespondedSent {
+		t.Fatal("expected the all-responded latch to reopen after someone new was added")
+	}
+}
+
+func TestSyncGroupMembersIsANoOpWithoutAnEvent(t *testing.T) {
+	m := NewManager(setupTestStorage(t, "America/Sao_Paulo"))
+
+	note, err := m.SyncGroupMembers(fmt.Sprintf("%d", testGroupChatID), []string{"@alice"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if note != "" {
+		t.Fatalf("expected no note when there is no event to sync, got %q", note)
+	}
+}
+
+// A roster change that adds and removes nobody must not redraw the card or
+// claim anything happened.
+func TestSyncGroupMembersIsANoOpWhenTheRosterMatches(t *testing.T) {
+	storageClient := setupTestStorage(t, "America/Sao_Paulo")
+	m := NewManager(storageClient)
+
+	if _, err := m.Manage(groupArgs(map[string]any{
+		"action":         "create",
+		"local_datetime": tomorrowAt(21),
+	})); err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+
+	note, err := m.SyncGroupMembers(fmt.Sprintf("%d", testGroupChatID), []string{"@alice", "@bob"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if note != "" {
+		t.Fatalf("expected no note when nothing changed, got %q", note)
+	}
+}
+
 func TestResolveTimezone(t *testing.T) {
 	for _, tc := range []struct{ in, want string }{
 		{"BRT", "America/Sao_Paulo"},
