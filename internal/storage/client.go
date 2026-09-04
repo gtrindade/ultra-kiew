@@ -3,6 +3,7 @@ package storage
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -33,9 +34,9 @@ func NewClient() *Client {
 }
 
 // Save saves the given data to a file with the specified name.
-func (s *Client) Save(name string, data any) error {
-	s.Lock()
-	defer s.Unlock()
+func (c *Client) Save(name string, data any) error {
+	c.Lock()
+	defer c.Unlock()
 
 	filePath := filepath.Join(BasePath, name)
 
@@ -58,18 +59,18 @@ func (s *Client) Save(name string, data any) error {
 
 	return nil
 }
-func (s *Client) SaveAsync(name string, data any) {
+func (c *Client) SaveAsync(name string, data any) {
 	go func() {
-		if err := s.Save(name, data); err != nil {
+		if err := c.Save(name, data); err != nil {
 			fmt.Printf("error saving file %s: %v\n", name, err)
 		}
 	}()
 }
 
 // Load loads data from a file with the specified name into the provided data structure.
-func (s *Client) Load(name string, data any) error {
-	s.RLock()
-	defer s.RUnlock()
+func (c *Client) Load(name string, data any) error {
+	c.RLock()
+	defer c.RUnlock()
 
 	filePath := filepath.Join(BasePath, name)
 	file, err := os.Open(filePath)
@@ -94,6 +95,38 @@ func (s *Client) Load(name string, data any) error {
 // LoadFromDB loads data from a file in the predefined database path.
 func (c *Client) LoadFromDB(name string, data any) error {
 	return c.Load(filepath.Join(DBPath, name), data)
+}
+
+// LoadForUpdate reads a state file the caller intends to write back, and
+// returns an error the caller must abort on.
+//
+// This distinction is the whole point, and ignoring it is a data-loss bug
+// rather than a nit. Load leaves data at its zero value in two very different
+// situations: the file does not exist yet (normal, every first run) and the
+// file exists but will not decode (a write torn by a crash, a half-synced
+// disk). A caller that drops the error cannot tell those apart -- it carries
+// on with an empty map, and the MustSave at the end of its work writes that
+// emptiness straight back over the file. A recoverable corrupt events.json
+// becomes a permanently empty one, and every scheduled session is gone.
+//
+// A missing file still loads cleanly as empty, so first runs are unaffected;
+// only a genuine read or decode failure stops the operation.
+func (c *Client) LoadForUpdate(name string, data any) error {
+	if err := c.LoadFromDB(name, data); err != nil {
+		return fmt.Errorf("could not read %s: %w -- refusing to continue, because saving now would overwrite it with nothing", name, err)
+	}
+	return nil
+}
+
+// LoadOrLog reads a state file the caller only consults and never writes back
+// -- a lookup table like users.json, or a cross-check against another
+// package's file. Losing it degrades the answer (a DM that cannot be
+// addressed, a hint the model does not get) but cannot destroy anything, so
+// the failure is recorded and the caller carries on.
+func (c *Client) LoadOrLog(name string, data any) {
+	if err := c.LoadFromDB(name, data); err != nil {
+		log.Printf("storage: could not read %s, continuing without it: %v", name, err)
+	}
 }
 
 // SaveToDB saves data to a file in the predefined database path and does not
@@ -124,9 +157,9 @@ func (c *Client) LoadChatHistory(data any) error {
 }
 
 // Delete removes the file with the specified name.
-func (s *Client) Delete(name string) error {
-	s.Lock()
-	defer s.Unlock()
+func (c *Client) Delete(name string) error {
+	c.Lock()
+	defer c.Unlock()
 
 	filePath := filepath.Join(BasePath, name)
 	if err := os.Remove(filePath); err != nil {

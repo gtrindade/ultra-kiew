@@ -88,7 +88,7 @@ func (c *Client) GetMonstersByName(name string) ([]*Monster, error) {
 		WHERE name LIKE ? OR altname LIKE ?
 	`, "%"+name+"%", "%"+name+"%")
 	if err != nil {
-		return nil, fmt.Errorf("failed to query monsters: %v", err)
+		return nil, fmt.Errorf("failed to query monsters: %w", err)
 	}
 	defer rows.Close()
 
@@ -132,13 +132,13 @@ func (c *Client) GetMonstersByName(name string) ([]*Monster, error) {
 			&monster.FullText,
 			&monster.Reference,
 		); err != nil {
-			return nil, fmt.Errorf("failed to scan monster: %v", err)
+			return nil, fmt.Errorf("failed to scan monster: %w", err)
 		}
 		monsters = append(monsters, &monster)
 	}
 
 	if err = rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating over rows: %v", err)
+		return nil, fmt.Errorf("error iterating over rows: %w", err)
 	}
 
 	if len(monsters) == 0 {

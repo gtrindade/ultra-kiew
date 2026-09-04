@@ -3,6 +3,7 @@ package googlegenai_test
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -14,15 +15,35 @@ import (
 	"github.com/gtrindade/ultra-kiew/internal/storage"
 )
 
+// TestIntegration_EventAI drives real Gemini calls, so it is opt-in rather
+// than opt-out.
+//
+// It used to run on any plain `go test ./...` that happened to find a
+// config.yaml with a key in it -- which meant the default local test run spent
+// real quota and took five seconds, and its assertions ("the model asks about
+// the timezone", "the model says the date is in the past") are about model
+// behaviour, so it can fail for reasons that have nothing to do with the
+// commit under test. Gate it on an explicit env var so CI and everyday runs
+// stay hermetic:
+//
+//	ULTRA_KIEW_INTEGRATION=1 go test ./internal/googlegenai/ -run Integration -v
 func TestIntegration_EventAI(t *testing.T) {
-	// Skip if running short tests
-	if testing.Short() {
-		t.Skip("Skipping integration test in short mode")
+	if os.Getenv("ULTRA_KIEW_INTEGRATION") == "" {
+		t.Skip("set ULTRA_KIEW_INTEGRATION=1 to run integration tests against the live Gemini API")
 	}
 
-	OriginalWd, _ := os.Getwd()
-	os.Chdir("../../")
-	defer os.Chdir(OriginalWd)
+	originalWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("could not read the working directory: %v", err)
+	}
+	if err := os.Chdir("../../"); err != nil {
+		t.Fatalf("could not change to the repo root: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(originalWd); err != nil {
+			t.Errorf("could not restore the working directory: %v", err)
+		}
+	})
 
 	cfg, err := config.LoadFromFile()
 	if err != nil || cfg.GeminiAPIKey == "" {
@@ -33,12 +54,13 @@ func TestIntegration_EventAI(t *testing.T) {
 	tempDir := t.TempDir()
 	storage.BasePath = tempDir
 	storage.DBPath = "db"
-	
-	// Create db directory
-	os.MkdirAll(tempDir+"/db", 0755)
+
+	if err := os.MkdirAll(filepath.Join(tempDir, "db"), 0o755); err != nil {
+		t.Fatalf("could not create the db dir: %v", err)
+	}
 
 	storageClient := storage.NewClient()
-	
+
 	// Pre-seed groups.json so the event creation allows it
 	groups := map[string]event.Group{
 		"-12345": {Users: []string{"@alice", "@bob", "@guilhermetmg"}},
@@ -69,13 +91,13 @@ func TestIntegration_EventAI(t *testing.T) {
 	// 1. Ask AI to schedule an event for 21:00 (without timezone)
 	// It should respond asking for the timezone!
 	chatID := int64(-12345)
-	
+
 	resp1, err := aiClient.SendMessage(ctx, chatID, "Test Group", "cria um evento as 21:00")
 	if err != nil {
 		t.Fatalf("Failed to send message: %v", err)
 	}
 	t.Logf("AI Response 1 (Asking for timezone): %s", resp1)
-	
+
 	if !strings.Contains(strings.ToLower(resp1), "fuso") && !strings.Contains(strings.ToLower(resp1), "horário") && !strings.Contains(strings.ToLower(resp1), "horario") {
 		t.Errorf("Expected AI to ask for timezone, but got: %s", resp1)
 	}
@@ -87,7 +109,7 @@ func TestIntegration_EventAI(t *testing.T) {
 		t.Fatalf("Failed to send message 2: %v", err)
 	}
 	t.Logf("AI Response 2 (Rejection): %s", resp2)
-	
+
 	// The AI must apologize that the event is in the past.
 	if !strings.Contains(strings.ToLower(resp2), "passado") && !strings.Contains(strings.ToLower(resp2), "já passou") && !strings.Contains(strings.ToLower(resp2), "passou") {
 		t.Errorf("Expected AI to apologize about past event, got: %s", resp2)
@@ -99,7 +121,7 @@ func TestIntegration_EventAI(t *testing.T) {
 		t.Fatalf("Failed to send message 3: %v", err)
 	}
 	t.Logf("AI Response 3 (Success): %s", resp3)
-	
+
 	// The AI generates __SILENT__ or empty or confirms briefly because we told it to output __SILENT__ and message.go skips it.
 	if resp3 != "" {
 		t.Errorf("Expected AI to output empty string due to __SILENT__, got: %s", resp3)

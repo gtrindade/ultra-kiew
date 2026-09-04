@@ -3,3 +3,6 @@
 /config.yaml
 
 *.exe
+
+# go test -coverprofile output
+coverage.out

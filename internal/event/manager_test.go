@@ -75,7 +75,7 @@ func dmArgs(extra map[string]any) map[string]any {
 }
 
 func tomorrowAt(hour int) string {
-	return time.Now().Add(24 * time.Hour).Format("2006-01-02") + fmt.Sprintf("T%02d:00", hour)
+	return time.Now().Add(24*time.Hour).Format("2006-01-02") + fmt.Sprintf("T%02d:00", hour)
 }
 
 func TestCreateRejectsPastTime(t *testing.T) {

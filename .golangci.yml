@@ -1,0 +1,105 @@
+# Linter configuration for ultra-kiew.
+#
+# The bias here is toward the failures this codebase has actually had, rather
+# than style for its own sake. Two categories earn their keep:
+#
+#   - errcheck / staticcheck: this bot's state lives in JSON files it loads,
+#     mutates and saves. A silently ignored load error turns a corrupt file
+#     into an empty one, and the very next MustSave writes that emptiness back
+#     over the real data. Anything that drops an error on that path is a
+#     data-loss bug, not a nit.
+#   - bodyclose / noctx / contextcheck: every outward call (Meet, Google OAuth,
+#     Telegram, Gemini) runs from a ticker goroutine that must not leak
+#     connections or block forever.
+#
+# Style linters that would only churn the existing, heavily commented code are
+# deliberately left off.
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - bodyclose
+    - noctx
+    - errorlint
+    - copyloopvar
+    - durationcheck
+    - nilerr
+    - unconvert
+    - usestdlibvars
+    - wastedassign
+
+  settings:
+    errcheck:
+      check-type-assertions: false
+      check-blank: false
+      # Fire-and-forget notification sends. Every one of these is a Telegram
+      # message the bot posts as a side effect of work that has already
+      # happened and been persisted; there is no useful recovery at the call
+      # site, and the code deliberately keeps going so one undeliverable DM
+      # cannot abort a roster update mid-way.
+      exclude-functions:
+        - (*github.com/go-telegram/bot.Bot).SendMessage
+        - (*github.com/go-telegram/bot.Bot).EditMessageText
+
+    govet:
+      enable-all: true
+      disable:
+        - fieldalignment
+        - shadow
+
+    staticcheck:
+      checks:
+        - all
+        # ST1000 (package comment on every package) would demand boilerplate
+        # on packages whose purpose is already obvious from the name.
+        - -ST1000
+        # ST1003 wants initialisms uppercased; the existing exported names
+        # (ArgCallerChatID and friends) are already consistent, and the ones
+        # it flags are local variables where renaming buys nothing.
+        - -ST1003
+
+  exclusions:
+    presets:
+      - std-error-handling
+    rules:
+      # cmd/meetspike is the throwaway API exploration that established the
+      # shape of internal/meet. It is kept as documentation of what was tried,
+      # not as production code, and holding it to the same bar would mean
+      # maintaining a spike.
+      - path: ^cmd/meetspike/
+        linters:
+          - errcheck
+          - noctx
+          - bodyclose
+          - unused
+
+      # noctx earns its keep on outbound HTTP, where a request with no context
+      # can hang the once-a-minute event monitor forever. It also flags
+      # database/sql and os/exec, and those two are not worth acting on here:
+      # the SRD lookups run against a local MySQL with no caller who could
+      # cancel them, and openBrowser is a fire-and-forget shell out during
+      # interactive consent, where there is no context in scope at all.
+      - path: (internal/mysql/|internal/google/auth\.go|internal/googlegenai/foundryvtt\.go)
+        linters:
+          - noctx
+
+      # Test setup: a failed MkdirAll or LoadFromDB in a helper shows up
+      # immediately as the assertion that follows it failing, and threading
+      # error checks through fixtures buys nothing.
+      - path: _test\.go
+        linters:
+          - errcheck
+
+formatters:
+  enable:
+    - gofmt

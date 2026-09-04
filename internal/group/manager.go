@@ -80,7 +80,9 @@ func (m *Manager) Manage(args map[string]any) (string, error) {
 	}
 
 	groups := make(map[string]Group)
-	m.storage.LoadFromDB(groupsFileName, &groups)
+	if err := m.storage.LoadForUpdate(groupsFileName, &groups); err != nil {
+		return "", err
+	}
 
 	chatIDStr := fmt.Sprintf("%d", chatID)
 
@@ -220,7 +222,7 @@ func (m *Manager) Manage(args map[string]any) (string, error) {
 		}
 
 		events := make(map[string]any)
-		m.storage.LoadFromDB("events.json", &events)
+		m.storage.LoadOrLog("events.json", &events)
 		if _, hasEvent := events[chatIDStr]; hasEvent {
 			return "Cannot remove the group because there is an active event associated with it. Tell the user to remove the event first.", nil
 		}
@@ -294,7 +296,7 @@ func (m *Manager) notifyNewMembers(chatID int64, chatTitle string, users []strin
 	}
 
 	knownUsers := make(map[string]int64)
-	m.storage.LoadFromDB(usersFileName, &knownUsers)
+	m.storage.LoadOrLog(usersFileName, &knownUsers)
 
 	groupName := chatTitle
 	if groupName == "" {

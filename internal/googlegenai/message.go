@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"google.golang.org/genai"
 )
@@ -87,7 +88,7 @@ func scrubResponse(text string) string {
 	return strings.TrimSpace(text)
 }
 
-// buildPrompt wraps the conversation context in explicit delimiters and states
+// BuildPrompt wraps the conversation context in explicit delimiters and states
 // plainly which part the model is answering.
 //
 // The previous format was the raw transcript followed by
@@ -460,13 +461,31 @@ func (c *Client) runToolCall(call *genai.FunctionCall, chatID int64, chatTitle s
 	}
 
 	if len(functionResult) > MaxFunctionResponseLength {
-		fmt.Printf("Function result too long (%d characters), truncating\n", len(functionResult))
-		functionResult = functionResult[:MaxFunctionResponseLength] + "...(truncated)"
+		log.Printf("function result too long (%d bytes), truncating", len(functionResult))
+		functionResult = truncateAtRuneBoundary(functionResult, MaxFunctionResponseLength) + "...(truncated)"
 	}
 
 	return genai.NewPartFromFunctionResponse(call.Name, map[string]any{
 		"result": functionResult,
 	})
+}
+
+// truncateAtRuneBoundary cuts s to at most maxBytes without splitting a
+// character in half.
+//
+// The naive s[:maxBytes] is a byte slice, and almost everything this bot
+// passes through here is multi-byte: Portuguese prose, and the confirmation
+// emoji on every event card. Landing mid-rune leaves an invalid UTF-8 tail,
+// which encoding/json then rewrites as U+FFFD -- so a truncated tool result
+// reached the model ending in a replacement character instead of a clean cut.
+func truncateAtRuneBoundary(s string, maxBytes int) string {
+	if len(s) <= maxBytes {
+		return s
+	}
+	for maxBytes > 0 && !utf8.RuneStart(s[maxBytes]) {
+		maxBytes--
+	}
+	return s[:maxBytes]
 }
 
 // hasUnansweredToolCall reports whether a history ends with a model turn whose

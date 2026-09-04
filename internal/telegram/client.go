@@ -94,14 +94,21 @@ func NewBot(config *config.Config, ai *googlegenai.Client, storageClient *storag
 		return nil, fmt.Errorf("failed to load chat history: %w", err)
 	}
 
-	c.storage.LoadFromDB("users.json", &c.users)
+	c.storage.LoadOrLog("users.json", &c.users)
 
 	return c, nil
 }
 
-// Start starts the Telegram bot and listens for updates.
+// Start starts the Telegram bot and listens for updates, returning when the
+// caller's context is cancelled or the process is interrupted.
+//
+// The interrupt handler is layered ON TOP of the passed context rather than
+// replacing it. It used to be built from context.Background(), which silently
+// discarded the caller's context entirely: main hands us the same ctx the
+// event monitor goroutine runs under, so anything that cancelled it could
+// never stop the bot loop, and Ctrl-C was the only thing that could.
 func (c *Client) Start(ctx context.Context) {
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, cancel := signal.NotifyContext(ctx, os.Interrupt)
 	defer cancel()
 
 	fmt.Println("Starting Telegram bot...")
@@ -127,7 +134,7 @@ func (c *Client) handler(ctx context.Context, b *bot.Bot, update *models.Update)
 	if isChatPrivate {
 		username := "@" + update.Message.From.Username
 		var events map[string]any // use a generic map to check existing events without importing internal/event
-		c.storage.LoadFromDB("events.json", &events)
+		c.storage.LoadOrLog("events.json", &events)
 
 		type Pending struct {
 			GroupID string

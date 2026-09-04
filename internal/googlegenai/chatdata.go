@@ -3,6 +3,7 @@ package googlegenai
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"strconv"
 	"strings"
 
@@ -134,7 +135,7 @@ func formatChatData(data map[string]string) string {
 				value = strings.Join(itemStrings, ", ")
 			}
 		}
-		sb.WriteString(fmt.Sprintf("- %s: %s\n", key, value))
+		fmt.Fprintf(&sb, "- %s: %s\n", key, value)
 	}
 	return sb.String()
 }
@@ -161,7 +162,9 @@ func getNumber[T ~float64 | ~int | ~int64](value any) (T, error) {
 
 func (c *Client) loadChatData(chatID int64) {
 	chatData := make(map[string]string)
-	c.storage.LoadFromDB(fmt.Sprintf(ChatDataFile, chatID), &chatData)
+	if err := c.storage.LoadFromDB(fmt.Sprintf(ChatDataFile, chatID), &chatData); err != nil {
+		log.Printf("chat %d: could not load stored chat data, continuing with none: %v", chatID, err)
+	}
 	c.lock.Lock()
 	c.chatData[chatID] = chatData
 	c.lock.Unlock()
@@ -182,7 +185,7 @@ func (c *Client) ChatData(args map[string]any) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("invalid argument: action is missing or not a string")
 	}
-	if isValidAction(action) == false {
+	if !isValidAction(action) {
 		return "", fmt.Errorf("invalid action: %s, must be one of %v", action, validActions)
 	}
 
@@ -251,7 +254,15 @@ func (c *Client) ChatData(args map[string]any) (string, error) {
 			}
 			chatData[path] = string(stringValue)
 		}
-		msg = fmt.Sprintf("Added %s to %s with quantity %d", value, path, quantity)
+		// Only describe this as a fresh add when it actually was one. This
+		// used to overwrite msg unconditionally, so bumping the count of
+		// something already held ("mais 3 pocoes") stored the right total but
+		// reported "Added pocao to inventario with quantity 3" -- and that
+		// string is what the model relays to the user, so the user was told a
+		// number that was not their new total.
+		if msg == "" {
+			msg = fmt.Sprintf("Added %s to %s with quantity %d", value, path, quantity)
+		}
 		c.saveChatData(chatID, chatData)
 		return msg, nil
 	case actionRemove:

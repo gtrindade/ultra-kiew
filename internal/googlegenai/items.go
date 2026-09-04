@@ -46,7 +46,7 @@ func (c *Client) ItemLookup(args map[string]any) (string, error) {
 
 	items, err := c.dbClient.GetItemsByName(itemName)
 	if err != nil {
-		return "", fmt.Errorf("failed to get items from database: %v", err)
+		return "", fmt.Errorf("failed to get items from database: %w", err)
 	}
 
 	if len(items) == 0 {
@@ -68,38 +68,38 @@ func (c *Client) ItemLookup(args map[string]any) (string, error) {
 func formatItemDescription(item *mysql.Item) string {
 	var desc strings.Builder
 
-	desc.WriteString(fmt.Sprintf("%s\n\n", item.Name))
+	fmt.Fprintf(&desc, "%s\n\n", item.Name)
 
 	if item.Category != nil && *item.Category != "" {
-		desc.WriteString(fmt.Sprintf("Category: %s\n", *item.Category))
+		fmt.Fprintf(&desc, "Category: %s\n", *item.Category)
 	}
 	if item.Subcategory != nil && *item.Subcategory != "" {
-		desc.WriteString(fmt.Sprintf("Subcategory: %s\n", *item.Subcategory))
+		fmt.Fprintf(&desc, "Subcategory: %s\n", *item.Subcategory)
 	}
 	desc.WriteString("\n")
 
 	if item.SpecialAbility != nil && *item.SpecialAbility != "" {
-		desc.WriteString(fmt.Sprintf("Special Ability: %s\n", *item.SpecialAbility))
+		fmt.Fprintf(&desc, "Special Ability: %s\n", *item.SpecialAbility)
 	}
 	if item.Aura != nil && *item.Aura != "" {
-		desc.WriteString(fmt.Sprintf("Aura: %s\n", *item.Aura))
+		fmt.Fprintf(&desc, "Aura: %s\n", *item.Aura)
 	}
 	if item.CasterLevel != nil && *item.CasterLevel != "" {
-		desc.WriteString(fmt.Sprintf("Caster Level: %s\n", *item.CasterLevel))
+		fmt.Fprintf(&desc, "Caster Level: %s\n", *item.CasterLevel)
 	}
 	if item.ManifesterLevel != nil && *item.ManifesterLevel != "" {
-		desc.WriteString(fmt.Sprintf("Manifester Level: %s\n", *item.ManifesterLevel))
+		fmt.Fprintf(&desc, "Manifester Level: %s\n", *item.ManifesterLevel)
 	}
 	desc.WriteString("\n")
 
 	if item.Price != nil && *item.Price != "" {
-		desc.WriteString(fmt.Sprintf("Price: %s\n", *item.Price))
+		fmt.Fprintf(&desc, "Price: %s\n", *item.Price)
 	}
 	if item.Cost != nil && *item.Cost != "" {
-		desc.WriteString(fmt.Sprintf("Cost: %s\n", *item.Cost))
+		fmt.Fprintf(&desc, "Cost: %s\n", *item.Cost)
 	}
 	if item.Weight != nil && *item.Weight != "" {
-		desc.WriteString(fmt.Sprintf("Weight: %s\n", *item.Weight))
+		fmt.Fprintf(&desc, "Weight: %s\n", *item.Weight)
 	}
 	desc.WriteString("\n")
 
@@ -116,7 +116,7 @@ func formatItemDescription(item *mysql.Item) string {
 	}
 
 	if item.Reference != nil && *item.Reference != "" {
-		desc.WriteString(fmt.Sprintf("Source: %s", *item.Reference))
+		fmt.Fprintf(&desc, "Source: %s", *item.Reference)
 	}
 
 	return desc.String()

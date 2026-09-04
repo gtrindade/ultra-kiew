@@ -13,6 +13,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -300,7 +301,12 @@ func (a *Authenticator) consent(ctx context.Context) error {
 	})
 
 	srv := &http.Server{Handler: mux}
-	go srv.Serve(listener)
+	go func() {
+		// ErrServerClosed is the deferred srv.Close below doing its job.
+		if err := srv.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			fmt.Printf("google: local consent listener stopped: %v\n", err)
+		}
+	}()
 	defer srv.Close()
 
 	fmt.Printf("\ngoogle: open this URL to authorise ultra-kiew for Google Meet:\n\n%s\n\n", authURL)

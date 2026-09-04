@@ -188,9 +188,10 @@ func (m *Manager) advanceMeetSession(ctx context.Context, chatIDStr string, ev E
 	if !meetInfo.RecapPosted {
 		pollDue := meetInfo.LastArtifactPollAt == 0 || now-meetInfo.LastArtifactPollAt >= int64(meetArtifactPollInterval.Seconds())
 		if pollDue && len(meetInfo.Segments) > 0 {
-			if m.pollMeetLinks(ctx, chatIDStr, &meetInfo) {
-				changed = true
-			}
+			// Changed either way: even a poll that turned up no new links
+			// moved LastArtifactPollAt, and that has to be persisted or the
+			// next tick polls again immediately instead of pacing itself.
+			m.pollMeetLinks(ctx, chatIDStr, &meetInfo)
 			meetInfo.LastArtifactPollAt = now
 			changed = true
 		}

@@ -15,7 +15,10 @@ import (
 	"strings"
 )
 
-const baseURL = "https://meet.googleapis.com/v2"
+// defaultBaseURL is the real API root. It is held on the Client rather than
+// referenced as a package constant so a test can point one client at an
+// httptest server without mutating global state that other tests share.
+const defaultBaseURL = "https://meet.googleapis.com/v2"
 
 // TokenSource is the one thing this package needs from the outside: a bearer
 // token. internal/google.Authenticator satisfies it.
@@ -24,11 +27,30 @@ type TokenSource interface {
 }
 
 type Client struct {
-	tokens TokenSource
+	tokens  TokenSource
+	baseURL string
+
+	// http is the transport used for every call. Left nil it falls back to
+	// http.DefaultClient, so the zero Client still works.
+	http *http.Client
 }
 
 func NewClient(tokens TokenSource) *Client {
-	return &Client{tokens: tokens}
+	return &Client{tokens: tokens, baseURL: defaultBaseURL}
+}
+
+func (c *Client) root() string {
+	if c.baseURL == "" {
+		return defaultBaseURL
+	}
+	return c.baseURL
+}
+
+func (c *Client) doer() *http.Client {
+	if c.http == nil {
+		return http.DefaultClient
+	}
+	return c.http
 }
 
 // ConferenceRecord is the subset of the API resource the event lifecycle
@@ -76,7 +98,7 @@ func (c *Client) do(ctx context.Context, method, endpoint string, payload any) (
 		req.Header.Set("Content-Type", "application/json")
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := c.doer().Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -160,14 +182,14 @@ func (c *Client) CreateSpace(ctx context.Context) (spaceName, joinURI string, er
 		},
 	}
 
-	result, err := c.do(ctx, http.MethodPost, baseURL+"/spaces", payload)
+	result, err := c.do(ctx, http.MethodPost, c.root()+"/spaces", payload)
 	if err != nil {
 		// Fall back to open access with no auto-transcription rather than
 		// failing outright: a session with a join link that at least doesn't
 		// need someone to admit every player is still strictly better than
 		// no Meet integration at all, and manually pressing "Transcribe
 		// meeting" still produces a transcript later.
-		result, err = c.do(ctx, http.MethodPost, baseURL+"/spaces", map[string]any{
+		result, err = c.do(ctx, http.MethodPost, c.root()+"/spaces", map[string]any{
 			"config": map[string]any{"accessType": "OPEN"},
 		})
 		if err != nil {
@@ -182,7 +204,7 @@ func (c *Client) CreateSpace(ctx context.Context) (spaceName, joinURI string, er
 // first is not guaranteed -- callers should not assume order.
 func (c *Client) ListConferenceRecords(ctx context.Context, spaceName string) ([]ConferenceRecord, error) {
 	filter := url.QueryEscape(fmt.Sprintf("space.name=\"%s\"", spaceName))
-	items, err := c.getAllPages(ctx, baseURL+"/conferenceRecords?filter="+filter, "conferenceRecords")
+	items, err := c.getAllPages(ctx, c.root()+"/conferenceRecords?filter="+filter, "conferenceRecords")
 	if err != nil {
 		return nil, err
 	}
@@ -227,13 +249,13 @@ func (c *Client) docsLinks(ctx context.Context, endpoint, itemsKey string) ([]st
 // transcription was never enabled for the meeting, or if the doc has not
 // landed yet.
 func (c *Client) TranscriptLinks(ctx context.Context, conferenceRecordName string) ([]string, error) {
-	return c.docsLinks(ctx, fmt.Sprintf("%s/%s/transcripts", baseURL, conferenceRecordName), "transcripts")
+	return c.docsLinks(ctx, fmt.Sprintf("%s/%s/transcripts", c.root(), conferenceRecordName), "transcripts")
 }
 
 // SmartNotesLinks returns a viewable Drive link for every "Notes by Gemini"
 // doc generated so far on this conference record.
 func (c *Client) SmartNotesLinks(ctx context.Context, conferenceRecordName string) ([]string, error) {
-	return c.docsLinks(ctx, fmt.Sprintf("%s/%s/smartNotes", baseURL, conferenceRecordName), "smartNotes")
+	return c.docsLinks(ctx, fmt.Sprintf("%s/%s/smartNotes", c.root(), conferenceRecordName), "smartNotes")
 }
 
 // Participant is one attendee of a conference record, as of the moment this
@@ -257,7 +279,7 @@ type Participant struct {
 // Someone who left and never came back keeps appearing here with Present
 // false, not removed from the list.
 func (c *Client) ListParticipants(ctx context.Context, conferenceRecordName string) ([]Participant, error) {
-	items, err := c.getAllPages(ctx, fmt.Sprintf("%s/%s/participants?pageSize=100", baseURL, conferenceRecordName), "participants")
+	items, err := c.getAllPages(ctx, fmt.Sprintf("%s/%s/participants?pageSize=100", c.root(), conferenceRecordName), "participants")
 	if err != nil {
 		return nil, err
 	}

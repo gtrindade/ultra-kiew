@@ -223,7 +223,9 @@ func (m *Manager) Manage(args map[string]any) (string, error) {
 	}
 
 	events := make(map[string]Event)
-	m.storage.LoadFromDB(eventsFileName, &events)
+	if err := m.storage.LoadForUpdate(eventsFileName, &events); err != nil {
+		return "", err
+	}
 	chatIDStr := fmt.Sprintf("%d", callerChatID)
 
 	switch action {
@@ -278,7 +280,7 @@ func (m *Manager) update(args map[string]any, chatID int64, chatIDStr string, ev
 	}
 
 	groups := make(map[string]Group)
-	m.storage.LoadFromDB(groupsFileName, &groups)
+	m.storage.LoadOrLog(groupsFileName, &groups)
 	group := groups[chatIDStr]
 
 	t, loc, err := resolveEventTime(args, group, "NO CHANGE WAS MADE")
@@ -313,7 +315,7 @@ func (m *Manager) update(args map[string]any, chatID int64, chatIDStr string, ev
 	m.storage.MustSave(eventsFileName, events)
 
 	knownUsers := make(map[string]int64)
-	m.storage.LoadFromDB(usersFileName, &knownUsers)
+	m.storage.LoadOrLog(usersFileName, &knownUsers)
 
 	var missingUsers []string
 	if m.bot != nil {
@@ -372,7 +374,7 @@ func (m *Manager) requestResponses(chatIDStr string, events map[string]Event) (s
 	}
 
 	knownUsers := make(map[string]int64)
-	m.storage.LoadFromDB(usersFileName, &knownUsers)
+	m.storage.LoadOrLog(usersFileName, &knownUsers)
 
 	var messaged, stillMissing []string
 	for _, u := range pending {
@@ -432,7 +434,7 @@ func resolveEventTime(args map[string]any, group Group, failPrefix string) (time
 
 	loc, err := resolveTimezone(tzInput)
 	if err != nil {
-		return time.Time{}, nil, fmt.Errorf("%v. Ask the user to state the timezone again, e.g. 'BRT'", err)
+		return time.Time{}, nil, fmt.Errorf("%w. Ask the user to state the timezone again, e.g. 'BRT'", err)
 	}
 
 	// Parsed in the resolved location, so the offset -- and DST for that
@@ -455,7 +457,9 @@ func (m *Manager) create(args map[string]any, chatID int64, chatIDStr string, ev
 	}
 
 	groups := make(map[string]Group)
-	m.storage.LoadFromDB(groupsFileName, &groups)
+	if err := m.storage.LoadForUpdate(groupsFileName, &groups); err != nil {
+		return "", err
+	}
 	group, hasGroup := groups[chatIDStr]
 	if !hasGroup || len(group.Users) == 0 {
 		return "No group exists for this chat. A group must be created first (group_manage) before scheduling an event. Ask the user who should be in the group.", nil
@@ -482,7 +486,7 @@ func (m *Manager) create(args map[string]any, chatID int64, chatIDStr string, ev
 
 	var missingUsers []string
 	knownUsers := make(map[string]int64)
-	m.storage.LoadFromDB(usersFileName, &knownUsers)
+	m.storage.LoadOrLog(usersFileName, &knownUsers)
 
 	confirmations := make(map[string]string)
 	for _, u := range group.Users {
@@ -573,7 +577,7 @@ func (m *Manager) updateStatus(args map[string]any, callerChatID int64, isPrivat
 	// In a private chat the chat ID is the user ID, so this identifies the
 	// caller with no help from the model.
 	knownUsers := make(map[string]int64)
-	m.storage.LoadFromDB(usersFileName, &knownUsers)
+	m.storage.LoadOrLog(usersFileName, &knownUsers)
 	var username string
 	for name, uid := range knownUsers {
 		if uid == callerChatID {
@@ -582,7 +586,7 @@ func (m *Manager) updateStatus(args map[string]any, callerChatID int64, isPrivat
 		}
 	}
 	if username == "" {
-		return "", fmt.Errorf("I do not recognise this user yet, so I cannot record an answer")
+		return "", fmt.Errorf("this user is not recognised yet, so no answer can be recorded")
 	}
 
 	status, _ := args["status"].(string)
@@ -610,7 +614,9 @@ func (m *Manager) updateStatus(args map[string]any, callerChatID int64, isPrivat
 	}
 
 	events := make(map[string]Event)
-	m.storage.LoadFromDB(eventsFileName, &events)
+	if err := m.storage.LoadForUpdate(eventsFileName, &events); err != nil {
+		return "", err
+	}
 
 	// Which events this user may answer for is computed here, from storage.
 	// The model may name one when there is more than one, but it can only pick
@@ -671,7 +677,7 @@ func (m *Manager) updateStatus(args map[string]any, callerChatID int64, isPrivat
 	event.Confirmations[username] = emoji
 
 	groups := make(map[string]Group)
-	m.storage.LoadFromDB(groupsFileName, &groups)
+	m.storage.LoadOrLog(groupsFileName, &groups)
 	groupUsers := groups[target].Users
 
 	groupChatID, err := strconv.ParseInt(target, 10, 64)
@@ -750,7 +756,9 @@ func (m *Manager) SyncGroupMembers(chatIDStr string, users []string) (string, er
 	defer m.mu.Unlock()
 
 	events := make(map[string]Event)
-	m.storage.LoadFromDB(eventsFileName, &events)
+	if err := m.storage.LoadForUpdate(eventsFileName, &events); err != nil {
+		return "", err
+	}
 
 	event, exists := events[chatIDStr]
 	if !exists {
@@ -1102,19 +1110,24 @@ func (m *Manager) runMonitorTick(ctx context.Context) {
 	defer m.mu.Unlock()
 
 	events := make(map[string]Event)
-	m.storage.LoadFromDB(eventsFileName, &events)
-
 	liveSessions := make(map[string][]Event)
-	m.storage.LoadFromDB(liveSessionsFileName, &liveSessions)
-
 	archivedEvents := make(map[string][]Event)
-	m.storage.LoadFromDB("archived_events.json", &archivedEvents)
+	for name, into := range map[string]any{
+		eventsFileName:         &events,
+		liveSessionsFileName:   &liveSessions,
+		"archived_events.json": &archivedEvents,
+	} {
+		if err := m.storage.LoadForUpdate(name, into); err != nil {
+			log.Printf("event monitor: skipping this tick: %v", err)
+			return
+		}
+	}
 
 	groups := make(map[string]Group)
-	m.storage.LoadFromDB(groupsFileName, &groups)
+	m.storage.LoadOrLog(groupsFileName, &groups)
 
 	knownUsers := make(map[string]int64)
-	m.storage.LoadFromDB(usersFileName, &knownUsers)
+	m.storage.LoadOrLog(usersFileName, &knownUsers)
 
 	eventsChanged := false
 	liveChanged := false

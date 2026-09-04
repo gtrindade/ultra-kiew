@@ -56,7 +56,7 @@ func (c *Client) GetEquipmentByName(name string) ([]*Equipment, error) {
 		WHERE name LIKE ?
 	`, "%"+name+"%")
 	if err != nil {
-		return nil, fmt.Errorf("failed to query equipment: %v", err)
+		return nil, fmt.Errorf("failed to query equipment: %w", err)
 	}
 	defer rows.Close()
 
@@ -84,13 +84,13 @@ func (c *Client) GetEquipmentByName(name string) ([]*Equipment, error) {
 			&item.FullText,
 			&item.Reference,
 		); err != nil {
-			return nil, fmt.Errorf("failed to scan equipment: %v", err)
+			return nil, fmt.Errorf("failed to scan equipment: %w", err)
 		}
 		equipment = append(equipment, &item)
 	}
 
 	if err = rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating over rows: %v", err)
+		return nil, fmt.Errorf("error iterating over rows: %w", err)
 	}
 
 	if len(equipment) == 0 {
