@@ -305,3 +305,74 @@ func TestTruncateRunesNeverSplitsACharacter(t *testing.T) {
 		t.Errorf("expected the string untouched, got %q", got)
 	}
 }
+
+// The exact reported scenario: a reply to ANOTHER user's message, with the bot
+// tagged in the text so it is triggered by the mention rather than by the
+// reply. Nothing in the capture path looks at who was replied to, so this must
+// behave identically to a reply aimed at the bot.
+func TestAReplyToAnotherUserWithTheBotTaggedIsStillCaptured(t *testing.T) {
+	c := newTestClient(t)
+
+	u := replyTo(update(-100, "alice", "@UltraKiewTestBot o que voce acha?", time.Now()),
+		&models.User{ID: 7, Username: "bmaraujo"}, "vamos jogar sabado?")
+
+	got := c.getMessageFromUpdate(u)
+	if got.ReplyToUser != "bmaraujo" || got.ReplyToText != "vamos jogar sabado?" {
+		t.Fatalf("the reply was lost: %+v", got)
+	}
+	if !strings.Contains(got.ReplyContext(), "vamos jogar sabado?") {
+		t.Errorf("the reply context is empty: %q", got.ReplyContext())
+	}
+	if !strings.Contains(got.String(), "em resposta a bmaraujo") {
+		t.Errorf("the backlog line lost the marker: %q", got.String())
+	}
+}
+
+// A reply to a message in another chat -- a forwarded channel post, say --
+// arrives with ReplyToMessage nil and ExternalReply set. ExternalReply carries
+// no text of its own, so Quote is the only place the words are, and dropping
+// it because ReplyToMessage was nil threw the whole case away.
+func TestAnExternalReplyKeepsItsQuotedText(t *testing.T) {
+	c := newTestClient(t)
+
+	u := update(-100, "alice", "isso aqui", time.Now())
+	u.Message.ExternalReply = &models.ExternalReplyInfo{MessageID: 99}
+	u.Message.Quote = &models.TextQuote{Text: "sessao adiada para domingo", IsManual: true}
+
+	got := c.getMessageFromUpdate(u)
+	if got.ReplyToText != "sessao adiada para domingo" {
+		t.Fatalf("the quoted text was dropped: %+v", got)
+	}
+	if got.ReplyToUser == "" {
+		t.Error("expected some attribution rather than none")
+	}
+	if !strings.Contains(got.ReplyContext(), "sessao adiada") {
+		t.Errorf("the reply context is empty: %q", got.ReplyContext())
+	}
+}
+
+func TestAnExternalReplyWithNoQuoteIsStillAnnounced(t *testing.T) {
+	c := newTestClient(t)
+
+	u := update(-100, "alice", "kkkk", time.Now())
+	u.Message.ExternalReply = &models.ExternalReplyInfo{MessageID: 99}
+
+	got := c.getMessageFromUpdate(u)
+	if got.ReplyToText == "" {
+		t.Error("expected the reply to be described rather than silently dropped")
+	}
+}
+
+// A standalone Quote with no ReplyToMessage and no ExternalReply should still
+// not be thrown away.
+func TestAStandaloneQuoteIsNotDropped(t *testing.T) {
+	c := newTestClient(t)
+
+	u := update(-100, "alice", "esse trecho", time.Now())
+	u.Message.Quote = &models.TextQuote{Text: "as 21h em ponto", IsManual: true}
+
+	got := c.getMessageFromUpdate(u)
+	if got.ReplyToText != "as 21h em ponto" {
+		t.Fatalf("the quote was dropped: %+v", got)
+	}
+}

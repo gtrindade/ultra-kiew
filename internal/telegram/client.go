@@ -3,6 +3,7 @@ package telegram
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"os/signal"
 	"strings"
@@ -286,6 +287,7 @@ func (c *Client) handler(ctx context.Context, b *bot.Bot, update *models.Update)
 	// means a restart costs recent context instead of all of it.
 	c.addToChatHistory(update)
 	current := c.getMessageFromUpdate(update)
+	c.logReplyCapture(update, current)
 	prompt := googlegenai.BuildPrompt(googlegenai.Prompt{
 		History:    c.getChatHistoryBefore(chatID, 1),
 		SystemNote: systemNote,
@@ -318,6 +320,26 @@ func (c *Client) handler(ctx context.Context, b *bot.Bot, update *models.Update)
 	}
 }
 
+// logReplyCapture records, for one handled message, what Telegram actually
+// delivered about the reply and what was made of it.
+//
+// This exists because "the model does not see the reply" has three completely
+// different causes that look identical from the chat: Telegram did not send
+// reply_to_message at all, it sent it and this code dropped it, or the running
+// binary predates reply support. One line per handled message tells them
+// apart, and its mere presence in the log proves which build is deployed.
+func (c *Client) logReplyCapture(update *models.Update, msg *SavedMessage) {
+	log.Printf("chat %d: handling message from @%s [reply_to_message=%t quote=%t external_reply=%t -> captured_from=%q captured_len=%d]",
+		update.Message.Chat.ID,
+		update.Message.From.Username,
+		update.Message.ReplyToMessage != nil,
+		update.Message.Quote != nil,
+		update.Message.ExternalReply != nil,
+		msg.ReplyToUser,
+		len(msg.ReplyToText),
+	)
+}
+
 // isSelf reports whether a user is this bot.
 //
 // The ID is the real answer; the handle comparison is a fallback for the case
@@ -334,7 +356,7 @@ func (c *Client) isSelf(from *models.User) bool {
 }
 
 func (c *Client) getMessageFromUpdate(update *models.Update) *SavedMessage {
-	replyUser, replyText := c.describeReplyTo(update.Message.ReplyToMessage, update.Message.Quote)
+	replyUser, replyText := c.describeReplyTo(update.Message)
 	return &SavedMessage{
 		UserID:      update.Message.From.ID,
 		UserName:    update.Message.From.Username,
@@ -347,19 +369,43 @@ func (c *Client) getMessageFromUpdate(update *models.Update) *SavedMessage {
 
 // describeReplyTo works out who and what a message was replying to.
 //
-// quote is Telegram's partial-quote reply: when someone highlights one line of
-// a long message before replying, that highlighted fragment is a far better
-// statement of what they mean than the whole message, so it wins.
-func (c *Client) describeReplyTo(replyTo *models.Message, quote *models.TextQuote) (user, text string) {
-	if replyTo == nil {
+// Telegram spreads this across three fields, and any of them can be the only
+// one present:
+//
+//   - ReplyToMessage: the ordinary case, a reply inside this chat.
+//   - Quote: the fragment the user highlighted before replying. When they took
+//     the trouble to highlight one line of a long message, that line is a far
+//     better statement of what they mean than the whole thing, so it wins.
+//   - ExternalReply: a reply to a message in ANOTHER chat (a forwarded channel
+//     post, say). ReplyToMessage is nil in that case and ExternalReply carries
+//     no text of its own -- Quote is the only place the words are. Dropping a
+//     Quote just because ReplyToMessage was nil, which this used to do, threw
+//     that case away entirely.
+func (c *Client) describeReplyTo(msg *models.Message) (user, text string) {
+	replyTo, quote, external := msg.ReplyToMessage, msg.Quote, msg.ExternalReply
+	if replyTo == nil && quote == nil && external == nil {
 		return "", ""
+	}
+
+	quoted := ""
+	if quote != nil {
+		quoted = strings.TrimSpace(quote.Text)
+	}
+
+	if replyTo == nil {
+		// A reply to something outside this chat. Nobody local to attribute it
+		// to, but the words -- if we have them -- are the whole point.
+		if quoted != "" {
+			return "alguem, em outra conversa", quoted
+		}
+		return "alguem, em outra conversa", "(uma mensagem de outro chat)"
 	}
 
 	user = c.replyAuthor(replyTo.From)
 
 	switch {
-	case quote != nil && strings.TrimSpace(quote.Text) != "":
-		text = quote.Text
+	case quoted != "":
+		text = quoted
 	case replyTo.Text != "":
 		text = replyTo.Text
 	case replyTo.Caption != "":
