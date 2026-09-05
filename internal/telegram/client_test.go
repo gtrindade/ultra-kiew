@@ -36,6 +36,9 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
+// testBotID stands in for the ID parsed out of the bot token in production.
+const testBotID = int64(4242)
+
 func newTestClient(t *testing.T) *Client {
 	t.Helper()
 	return &Client{
@@ -44,6 +47,7 @@ func newTestClient(t *testing.T) *Client {
 		maxHistorySize: 600,
 		users:          make(map[string]int64),
 		botName:        "kiew",
+		selfID:         testBotID,
 	}
 }
 

@@ -23,6 +23,17 @@ const contextCarryOver = 20
 
 const lineSep = "\n"
 
+// How much of a replied-to message is quoted, in runes.
+//
+// Two limits because the two renderings have different jobs. The backlog line
+// only needs enough to tell one referent from another, and has to stay on one
+// line; the block shown for the message actually being answered is the one the
+// model reasons over, so it gets room for something as long as an event card.
+const (
+	replyQuoteMaxRunes   = 80
+	replyContextMaxRunes = 600
+)
+
 // Client represents the Telegram bot client.
 type Client struct {
 	bot            *bot.Bot
@@ -34,6 +45,12 @@ type Client struct {
 	maxHistorySize int
 	users          map[string]int64
 	usersLock      sync.RWMutex
+
+	// selfID is this bot's own Telegram user ID, so a reply to something the
+	// bot said can be recognised by identity rather than by matching the
+	// configured bot_name against a handle. The two are not required to be
+	// the same string, and another bot in the group is not this one.
+	selfID int64
 }
 
 // SavedMessage represents a message saved from a user.
@@ -42,10 +59,74 @@ type SavedMessage struct {
 	UserName  string
 	Text      string
 	Timestamp time.Time
+
+	// ReplyToUser and ReplyToText record what this message was a reply to, if
+	// anything. Both are omitempty so a chat_history.json written before these
+	// existed still decodes.
+	//
+	// Without them a reply reached the model as a bare "sim", "esse mesmo" or
+	// "bora" with no referent: Telegram shows the quoted message in the
+	// client, but the update only carried the new text. That is worst exactly
+	// where replies are most natural -- answering the bot own event card,
+	// which is not in the backlog at all and may predate the current genai
+	// session by a restart.
+	ReplyToUser string `json:",omitempty"`
+	ReplyToText string `json:",omitempty"`
 }
 
 func (m *SavedMessage) String() string {
-	return fmt.Sprintf("[%s - %s]: `%s`", m.Timestamp.Format(time.RFC3339), m.UserName, m.Text)
+	return fmt.Sprintf("[%s - %s]%s: `%s`",
+		m.Timestamp.Format(time.RFC3339), m.UserName, m.replyMarker(), m.Text)
+}
+
+// replyMarker renders the reply as a parenthetical inside the existing line
+// format, rather than as a second line.
+//
+// One line is a hard requirement, not tidiness: googlegenai.leakedLineRegex
+// strips echoed transcript lines one at a time, and a continuation line would
+// slip past it -- which is the exact failure that once had the bot quoting
+// messages real users never sent.
+func (m *SavedMessage) replyMarker() string {
+	if m.ReplyToUser == "" && m.ReplyToText == "" {
+		return ""
+	}
+	who := m.ReplyToUser
+	if who == "" {
+		who = "alguem"
+	}
+	quoted := truncateRunes(strings.Join(strings.Fields(m.ReplyToText), " "), replyQuoteMaxRunes)
+	if quoted == "" {
+		return fmt.Sprintf(" (em resposta a %s)", who)
+	}
+	return fmt.Sprintf(" (em resposta a %s: %q)", who, quoted)
+}
+
+// ReplyContext renders the full quoted message for the <replying_to> block,
+// keeping the line breaks that make something like an event card readable.
+// Returns "" when the message was not a reply.
+func (m *SavedMessage) ReplyContext() string {
+	if m.ReplyToUser == "" && m.ReplyToText == "" {
+		return ""
+	}
+	who := m.ReplyToUser
+	if who == "" {
+		who = "alguem"
+	}
+	if m.ReplyToText == "" {
+		return fmt.Sprintf("%s (mensagem sem texto)", who)
+	}
+	return fmt.Sprintf("%s: %s", who, truncateRunes(m.ReplyToText, replyContextMaxRunes))
+}
+
+// truncateRunes cuts to at most maxRunes runes -- runes rather than bytes
+// because everything here is Portuguese prose and card emoji, where a byte cut
+// lands mid-character.
+func truncateRunes(s string, maxRunes int) string {
+	runes := []rune(s)
+	if len(runes) <= maxRunes {
+		return s
+	}
+	return strings.TrimRight(string(runes[:maxRunes]), " ") + "..."
 }
 
 // NewBot creates a new Telegram bot client with the provided configuration and AI client.
@@ -88,6 +169,8 @@ func NewBot(config *config.Config, ai *googlegenai.Client, storageClient *storag
 
 	c.bot = b
 	c.botName = config.BotName
+	// Parsed straight out of the token; no network call.
+	c.selfID = b.ID()
 
 	err = c.storage.LoadChatHistory(&c.chatHistory)
 	if err != nil {
@@ -187,7 +270,7 @@ func (c *Client) handler(ctx context.Context, b *bot.Bot, update *models.Update)
 	}
 
 	hasBotName := strings.Contains(strings.ToLower(text), strings.ToLower(c.botName))
-	isReplyToBot := update.Message.ReplyToMessage != nil && update.Message.ReplyToMessage.From != nil && strings.EqualFold(update.Message.ReplyToMessage.From.Username, c.botName)
+	isReplyToBot := update.Message.ReplyToMessage != nil && c.isSelf(update.Message.ReplyToMessage.From)
 	if !isChatPrivate && !hasBotName && !isReplyToBot {
 		c.addToChatHistory(update)
 		return
@@ -202,11 +285,13 @@ func (c *Client) handler(ctx context.Context, b *bot.Bot, update *models.Update)
 	// what happened when it was restarted mid-test. Keeping a bounded tail
 	// means a restart costs recent context instead of all of it.
 	c.addToChatHistory(update)
-	prompt := googlegenai.BuildPrompt(
-		c.getChatHistoryBefore(chatID, 1),
-		getMessageFromUpdate(update).String(),
-		systemNote,
-	)
+	current := c.getMessageFromUpdate(update)
+	prompt := googlegenai.BuildPrompt(googlegenai.Prompt{
+		History:    c.getChatHistoryBefore(chatID, 1),
+		SystemNote: systemNote,
+		Message:    current.String(),
+		ReplyingTo: current.ReplyContext(),
+	})
 	c.trimChatHistory(chatID)
 
 	chatTitle := update.Message.Chat.Title
@@ -233,19 +318,106 @@ func (c *Client) handler(ctx context.Context, b *bot.Bot, update *models.Update)
 	}
 }
 
-func getMessageFromUpdate(update *models.Update) *SavedMessage {
+// isSelf reports whether a user is this bot.
+//
+// The ID is the real answer; the handle comparison is a fallback for the case
+// where the token could not be parsed, and it is kept behind IsBot so a human
+// who happens to be named like the bot is never mistaken for it.
+func (c *Client) isSelf(from *models.User) bool {
+	if from == nil {
+		return false
+	}
+	if c.selfID != 0 && from.ID == c.selfID {
+		return true
+	}
+	return from.IsBot && c.botName != "" && strings.EqualFold(from.Username, c.botName)
+}
+
+func (c *Client) getMessageFromUpdate(update *models.Update) *SavedMessage {
+	replyUser, replyText := c.describeReplyTo(update.Message.ReplyToMessage, update.Message.Quote)
 	return &SavedMessage{
-		UserID:    update.Message.From.ID,
-		UserName:  update.Message.From.Username,
-		Text:      update.Message.Text,
-		Timestamp: time.Unix(int64(update.Message.Date), 0),
+		UserID:      update.Message.From.ID,
+		UserName:    update.Message.From.Username,
+		Text:        update.Message.Text,
+		Timestamp:   time.Unix(int64(update.Message.Date), 0),
+		ReplyToUser: replyUser,
+		ReplyToText: replyText,
+	}
+}
+
+// describeReplyTo works out who and what a message was replying to.
+//
+// quote is Telegram's partial-quote reply: when someone highlights one line of
+// a long message before replying, that highlighted fragment is a far better
+// statement of what they mean than the whole message, so it wins.
+func (c *Client) describeReplyTo(replyTo *models.Message, quote *models.TextQuote) (user, text string) {
+	if replyTo == nil {
+		return "", ""
+	}
+
+	user = c.replyAuthor(replyTo.From)
+
+	switch {
+	case quote != nil && strings.TrimSpace(quote.Text) != "":
+		text = quote.Text
+	case replyTo.Text != "":
+		text = replyTo.Text
+	case replyTo.Caption != "":
+		text = replyTo.Caption
+	default:
+		// No text at all. Naming the kind of thing still beats silence: it is
+		// the difference between the model knowing there is a referent it
+		// cannot read and it thinking there was no reply.
+		text = describeNonTextMessage(replyTo)
+	}
+	return user, text
+}
+
+// replyAuthor names the author of a replied-to message the way the transcript
+// names everyone else: the bare @handle, no "@".
+func (c *Client) replyAuthor(from *models.User) string {
+	if from == nil {
+		// Anonymous admins and channel posts have no From.
+		return "alguem"
+	}
+	if c.isSelf(from) {
+		// The bot's own Telegram handle is not necessarily what it is called
+		// in the prompt, and the model has to recognise its own past messages
+		// as its own -- the event card most of all.
+		return c.botName
+	}
+	if from.Username != "" {
+		return from.Username
+	}
+	if from.FirstName != "" {
+		return from.FirstName
+	}
+	return "alguem"
+}
+
+func describeNonTextMessage(msg *models.Message) string {
+	switch {
+	case len(msg.Photo) > 0:
+		return "(uma foto)"
+	case msg.Sticker != nil:
+		return "(um sticker)"
+	case msg.Voice != nil:
+		return "(um audio)"
+	case msg.Video != nil || msg.VideoNote != nil:
+		return "(um video)"
+	case msg.Document != nil:
+		return "(um arquivo)"
+	case msg.Poll != nil:
+		return "(uma enquete)"
+	default:
+		return ""
 	}
 }
 
 func (c *Client) addToChatHistory(update *models.Update) {
 	c.lock.Lock()
 	defer c.lock.Unlock()
-	msg := getMessageFromUpdate(update)
+	msg := c.getMessageFromUpdate(update)
 	chatID := update.Message.Chat.ID
 	if c.chatHistory[chatID] == nil {
 		c.chatHistory[chatID] = make([]*SavedMessage, 0)
