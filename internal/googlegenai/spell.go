@@ -49,7 +49,7 @@ func (c *Client) SpellLookup(args map[string]any) (string, error) {
 
 	spells, err := c.dbClient.GetSpellByName(spellName)
 	if err != nil {
-		return "", fmt.Errorf("failed to get spell from database: %v", err)
+		return "", fmt.Errorf("failed to get spell from database: %w", err)
 	}
 
 	if len(spells) == 0 {
@@ -91,45 +91,45 @@ func formatSpellDescription(spell *mysql.Spell) string {
 	var desc strings.Builder
 
 	// Header with name and school
-	desc.WriteString(fmt.Sprintf("%s\n", spell.Name))
+	fmt.Fprintf(&desc, "%s\n", spell.Name)
 	if spell.SubSchool != "" {
-		desc.WriteString(fmt.Sprintf("%s [%s]\n", spell.School, spell.SubSchool))
+		fmt.Fprintf(&desc, "%s [%s]\n", spell.School, spell.SubSchool)
 	} else {
-		desc.WriteString(fmt.Sprintf("%s\n", spell.School))
+		fmt.Fprintf(&desc, "%s\n", spell.School)
 	}
 	desc.WriteString("\n")
 
 	// Level information
 	if spell.ClassLevels != nil && *spell.ClassLevels != "" {
-		desc.WriteString(fmt.Sprintf("Level: %s\n", *spell.ClassLevels))
+		fmt.Fprintf(&desc, "Level: %s\n", *spell.ClassLevels)
 	}
 
 	// Components
 	if spell.Components != "" {
-		desc.WriteString(fmt.Sprintf("Components: %s\n", spell.Components))
+		fmt.Fprintf(&desc, "Components: %s\n", spell.Components)
 	}
 
 	// Spell characteristics
 	if spell.CastingTime != nil && *spell.CastingTime != "" {
-		desc.WriteString(fmt.Sprintf("Casting Time: %s\n", *spell.CastingTime))
+		fmt.Fprintf(&desc, "Casting Time: %s\n", *spell.CastingTime)
 	}
 	if spell.Range != nil && *spell.Range != "" {
-		desc.WriteString(fmt.Sprintf("Range: %s\n", *spell.Range))
+		fmt.Fprintf(&desc, "Range: %s\n", *spell.Range)
 	}
 	if spell.Effect != nil && *spell.Effect != "" {
-		desc.WriteString(fmt.Sprintf("Effect: %s\n", *spell.Effect))
+		fmt.Fprintf(&desc, "Effect: %s\n", *spell.Effect)
 	}
 	if spell.Area != nil && *spell.Area != "" {
-		desc.WriteString(fmt.Sprintf("Area: %s\n", *spell.Area))
+		fmt.Fprintf(&desc, "Area: %s\n", *spell.Area)
 	}
 	if spell.Duration != nil && *spell.Duration != "" {
-		desc.WriteString(fmt.Sprintf("Duration: %s\n", *spell.Duration))
+		fmt.Fprintf(&desc, "Duration: %s\n", *spell.Duration)
 	}
 	if spell.SavingThrow != nil && *spell.SavingThrow != "" {
-		desc.WriteString(fmt.Sprintf("Saving Throw: %s\n", *spell.SavingThrow))
+		fmt.Fprintf(&desc, "Saving Throw: %s\n", *spell.SavingThrow)
 	}
 	if spell.SpellResistance != nil && *spell.SpellResistance != "" {
-		desc.WriteString(fmt.Sprintf("Spell Resistance: %s\n", *spell.SpellResistance))
+		fmt.Fprintf(&desc, "Spell Resistance: %s\n", *spell.SpellResistance)
 	}
 
 	// Description
@@ -138,7 +138,7 @@ func formatSpellDescription(spell *mysql.Spell) string {
 
 	// Source
 	if spell.Source != "" {
-		desc.WriteString(fmt.Sprintf("\n\nSource: %s\n\n", spell.Source))
+		fmt.Fprintf(&desc, "\n\nSource: %s\n\n", spell.Source)
 	}
 
 	return desc.String()

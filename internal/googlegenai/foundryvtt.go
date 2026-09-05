@@ -78,7 +78,7 @@ func (c *Client) FoundryVTT(args map[string]any) (string, error) {
 func (c *Client) listFoundryVersions() (string, error) {
 	entries, err := os.ReadDir(c.config.FoundryVTT.Directory)
 	if err != nil {
-		return "", fmt.Errorf("failed to read directory: %v", err)
+		return "", fmt.Errorf("failed to read directory: %w", err)
 	}
 
 	var versions []string
@@ -111,15 +111,15 @@ func (c *Client) switchFoundryVersion(version string) (string, error) {
 	dst := filepath.Join(c.config.FoundryVTT.Directory, symlink)
 	err := c.overrideSymlink(src, dst)
 	if err != nil {
-		return "", fmt.Errorf("failed to update symlink: %v", err)
+		return "", fmt.Errorf("failed to update symlink: %w", err)
 	}
 
 	if err := c.runSystemCommand("sudo", "systemctl", "daemon-reload"); err != nil {
-		return "", fmt.Errorf("failed to reload systemd: %v", err)
+		return "", fmt.Errorf("failed to reload systemd: %w", err)
 	}
 
 	if err := c.runSystemCommand("sudo", "systemctl", "restart", "foundryvtt"); err != nil {
-		return "", fmt.Errorf("failed to restart foundryvtt service: %v", err)
+		return "", fmt.Errorf("failed to restart foundryvtt service: %w", err)
 	}
 
 	return fmt.Sprintf("Successfully switched to FoundryVTT version %s", version), nil
@@ -136,12 +136,12 @@ func (c *Client) checkIfVersionExists(version string) bool {
 func (c *Client) overrideSymlink(src, dst string) error {
 	if _, err := os.Lstat(dst); err == nil {
 		if err := os.Remove(dst); err != nil {
-			return fmt.Errorf("failed to remove existing symlink: %v", err)
+			return fmt.Errorf("failed to remove existing symlink: %w", err)
 		}
 	}
 
 	if err := os.Symlink(src, dst); err != nil {
-		return fmt.Errorf("failed to create symlink from %s to %s: %v", src, dst, err)
+		return fmt.Errorf("failed to create symlink from %s to %s: %w", src, dst, err)
 	}
 	return nil
 }
@@ -149,7 +149,7 @@ func (c *Client) overrideSymlink(src, dst string) error {
 func (c *Client) runSystemCommand(name string, args ...string) error {
 	cmd := exec.Command(name, args...)
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to run command %s: %v", name, err)
+		return fmt.Errorf("failed to run command %s: %w", name, err)
 	}
 	return nil
 }

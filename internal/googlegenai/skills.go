@@ -46,7 +46,7 @@ func (c *Client) SkillLookup(args map[string]any) (string, error) {
 
 	skills, err := c.dbClient.GetSkillsByName(skillName)
 	if err != nil {
-		return "", fmt.Errorf("failed to get skills from database: %v", err)
+		return "", fmt.Errorf("failed to get skills from database: %w", err)
 	}
 
 	if len(skills) == 0 {
@@ -68,20 +68,20 @@ func (c *Client) SkillLookup(args map[string]any) (string, error) {
 func formatSkillDescription(skill *mysql.Skill) string {
 	var desc strings.Builder
 
-	desc.WriteString(fmt.Sprintf("%s\n\n", skill.Name))
+	fmt.Fprintf(&desc, "%s\n\n", skill.Name)
 
 	// Basic information
 	if skill.KeyAbility != nil && *skill.KeyAbility != "" {
-		desc.WriteString(fmt.Sprintf("Key Ability: %s\n", *skill.KeyAbility))
+		fmt.Fprintf(&desc, "Key Ability: %s\n", *skill.KeyAbility)
 	}
 	if skill.Trained != nil && *skill.Trained != "" {
-		desc.WriteString(fmt.Sprintf("Trained Only: %s\n", *skill.Trained))
+		fmt.Fprintf(&desc, "Trained Only: %s\n", *skill.Trained)
 	}
 	if skill.ArmorCheck != nil && *skill.ArmorCheck != "" {
-		desc.WriteString(fmt.Sprintf("Armor Check Penalty: %s\n", *skill.ArmorCheck))
+		fmt.Fprintf(&desc, "Armor Check Penalty: %s\n", *skill.ArmorCheck)
 	}
 	if skill.Psionic != nil && *skill.Psionic != "" {
-		desc.WriteString(fmt.Sprintf("Psionic: %s\n", *skill.Psionic))
+		fmt.Fprintf(&desc, "Psionic: %s\n", *skill.Psionic)
 	}
 	desc.WriteString("\n")
 
@@ -143,7 +143,7 @@ func formatSkillDescription(skill *mysql.Skill) string {
 		desc.WriteString("\n\n")
 	}
 	if skill.Reference != nil && *skill.Reference != "" {
-		desc.WriteString(fmt.Sprintf("Source: %s", *skill.Reference))
+		fmt.Fprintf(&desc, "Source: %s", *skill.Reference)
 	}
 
 	return desc.String()

@@ -46,7 +46,7 @@ func (c *Client) FeatLookup(args map[string]any) (string, error) {
 
 	feats, err := c.dbClient.GetFeatByName(featName)
 	if err != nil {
-		return "", fmt.Errorf("failed to get feat from database: %v", err)
+		return "", fmt.Errorf("failed to get feat from database: %w", err)
 	}
 
 	if len(feats) == 0 {
@@ -68,10 +68,10 @@ func (c *Client) FeatLookup(args map[string]any) (string, error) {
 func formatFeatDescription(feat *mysql.Feat) string {
 	var desc strings.Builder
 
-	desc.WriteString(fmt.Sprintf("%s\n\n", feat.Name))
+	fmt.Fprintf(&desc, "%s\n\n", feat.Name)
 
 	if feat.Categories != "" {
-		desc.WriteString(fmt.Sprintf("Categories: %s\n\n", feat.Categories))
+		fmt.Fprintf(&desc, "Categories: %s\n\n", feat.Categories)
 	}
 
 	if feat.Description != "" {
@@ -99,7 +99,7 @@ func formatFeatDescription(feat *mysql.Feat) string {
 	}
 
 	if feat.Source != "" {
-		desc.WriteString(fmt.Sprintf("Source: %s", feat.Source))
+		fmt.Fprintf(&desc, "Source: %s", feat.Source)
 	}
 
 	return desc.String()

@@ -3,6 +3,8 @@ package googlegenai
 import (
 	"encoding/json"
 	"fmt"
+	"log"
+	"strconv"
 	"strings"
 
 	"google.golang.org/genai"
@@ -55,7 +57,7 @@ var (
 						There are no restrictions on property names - any valid identifier can be used.
 						New characters and properties are automatically created when setting values.
 
-						Don't ever need to send the chat ID back to the user.
+						The chat this applies to is determined automatically by the system. You do not have a chat ID, never ask for one and never mention one.
 						`,
 				Parameters: &genai.Schema{
 					Type: "object",
@@ -72,10 +74,6 @@ var (
 							`,
 							Enum: validActions,
 						},
-						"chatID": {
-							Type:        "integer",
-							Description: "Chat ID to associate with the data. It will always be available in the format at the end of the message. You can only take the chatID from the end of the message, if there are multiple chatIDs, take the last one.",
-						},
 						"path": {
 							Type:        "string",
 							Description: "Access path in format character.property using valid identifiers without spaces or special characters. Not required for show action.",
@@ -89,7 +87,7 @@ var (
 							Description: "Quantity of the item to add or remove when using add or remove actions (optional, defaults to 1)",
 						},
 					},
-					Required: []string{"action", "path"},
+					Required: []string{"action"},
 				},
 			},
 		},
@@ -137,7 +135,7 @@ func formatChatData(data map[string]string) string {
 				value = strings.Join(itemStrings, ", ")
 			}
 		}
-		sb.WriteString(fmt.Sprintf("- %s: %s\n", key, value))
+		fmt.Fprintf(&sb, "- %s: %s\n", key, value)
 	}
 	return sb.String()
 }
@@ -150,6 +148,12 @@ func getNumber[T ~float64 | ~int | ~int64](value any) (T, error) {
 		num = T(x)
 	} else if x, ok := value.(int); ok {
 		num = T(x)
+	} else if xStr, ok := value.(string); ok {
+		f, err := strconv.ParseFloat(xStr, 64)
+		if err != nil {
+			return num, fmt.Errorf("failed to parse string as number")
+		}
+		num = T(f)
 	} else {
 		return num, fmt.Errorf("failed to parse number")
 	}
@@ -158,7 +162,9 @@ func getNumber[T ~float64 | ~int | ~int64](value any) (T, error) {
 
 func (c *Client) loadChatData(chatID int64) {
 	chatData := make(map[string]string)
-	c.storage.LoadFromDB(fmt.Sprintf(ChatDataFile, chatID), &chatData)
+	if err := c.storage.LoadFromDB(fmt.Sprintf(ChatDataFile, chatID), &chatData); err != nil {
+		log.Printf("chat %d: could not load stored chat data, continuing with none: %v", chatID, err)
+	}
 	c.lock.Lock()
 	c.chatData[chatID] = chatData
 	c.lock.Unlock()
@@ -169,16 +175,17 @@ func (c *Client) saveChatData(chatID int64, data map[string]string) {
 }
 
 func (c *Client) ChatData(args map[string]any) (string, error) {
-	chatID, err := getNumber[int64](args["chatID"])
-	if err != nil {
-		return "", fmt.Errorf("invalid argument: chatID is missing or not a number")
+	// The chat is supplied by the code, not by the model. See group.Manage.
+	chatID, ok := args[ArgCallerChatID].(int64)
+	if !ok {
+		return "", fmt.Errorf("internal error: caller chat context is missing")
 	}
 
 	action, ok := args["action"].(string)
 	if !ok {
 		return "", fmt.Errorf("invalid argument: action is missing or not a string")
 	}
-	if isValidAction(action) == false {
+	if !isValidAction(action) {
 		return "", fmt.Errorf("invalid action: %s, must be one of %v", action, validActions)
 	}
 
@@ -197,10 +204,17 @@ func (c *Client) ChatData(args map[string]any) (string, error) {
 		quantity = 1
 	}
 
-	if c.chatData[chatID] == nil {
-		c.loadChatData(chatID)
-	}
+	// Guarded because the event monitor goroutine and the Telegram handler both
+	// reach this map; an unguarded concurrent write aborts the process.
+	c.lock.RLock()
 	chatData := c.chatData[chatID]
+	c.lock.RUnlock()
+	if chatData == nil {
+		c.loadChatData(chatID)
+		c.lock.RLock()
+		chatData = c.chatData[chatID]
+		c.lock.RUnlock()
+	}
 
 	fmt.Printf("Performing action: %q with path: %s and value: %s\n", action, path, value)
 	switch action {
@@ -240,7 +254,15 @@ func (c *Client) ChatData(args map[string]any) (string, error) {
 			}
 			chatData[path] = string(stringValue)
 		}
-		msg = fmt.Sprintf("Added %s to %s with quantity %d", value, path, quantity)
+		// Only describe this as a fresh add when it actually was one. This
+		// used to overwrite msg unconditionally, so bumping the count of
+		// something already held ("mais 3 pocoes") stored the right total but
+		// reported "Added pocao to inventario with quantity 3" -- and that
+		// string is what the model relays to the user, so the user was told a
+		// number that was not their new total.
+		if msg == "" {
+			msg = fmt.Sprintf("Added %s to %s with quantity %d", value, path, quantity)
+		}
 		c.saveChatData(chatID, chatData)
 		return msg, nil
 	case actionRemove:

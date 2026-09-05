@@ -46,7 +46,7 @@ func (c *Client) EquipmentLookup(args map[string]any) (string, error) {
 
 	equipment, err := c.dbClient.GetEquipmentByName(equipmentName)
 	if err != nil {
-		return "", fmt.Errorf("failed to get equipment from database: %v", err)
+		return "", fmt.Errorf("failed to get equipment from database: %w", err)
 	}
 
 	if len(equipment) == 0 {
@@ -68,27 +68,27 @@ func (c *Client) EquipmentLookup(args map[string]any) (string, error) {
 func formatEquipmentDescription(item *mysql.Equipment) string {
 	var desc strings.Builder
 
-	desc.WriteString(fmt.Sprintf("%s\n\n", item.Name))
+	fmt.Fprintf(&desc, "%s\n\n", item.Name)
 
 	if item.Category != nil {
-		desc.WriteString(fmt.Sprintf("Category: %s\n", *item.Category))
+		fmt.Fprintf(&desc, "Category: %s\n", *item.Category)
 	}
 	if item.Subcategory != nil {
-		desc.WriteString(fmt.Sprintf("Subcategory: %s\n", *item.Subcategory))
+		fmt.Fprintf(&desc, "Subcategory: %s\n", *item.Subcategory)
 	}
 	if item.Family != nil {
-		desc.WriteString(fmt.Sprintf("Family: %s\n", *item.Family))
+		fmt.Fprintf(&desc, "Family: %s\n", *item.Family)
 	}
 	desc.WriteString("\n")
 
 	if item.Cost != nil {
-		desc.WriteString(fmt.Sprintf("Cost: %s\n", *item.Cost))
+		fmt.Fprintf(&desc, "Cost: %s\n", *item.Cost)
 	}
 	if item.Weight != nil {
-		desc.WriteString(fmt.Sprintf("Weight: %s\n", *item.Weight))
+		fmt.Fprintf(&desc, "Weight: %s\n", *item.Weight)
 	}
 	if item.Type != nil {
-		desc.WriteString(fmt.Sprintf("Type: %s\n", *item.Type))
+		fmt.Fprintf(&desc, "Type: %s\n", *item.Type)
 	}
 	desc.WriteString("\n")
 
@@ -96,16 +96,16 @@ func formatEquipmentDescription(item *mysql.Equipment) string {
 	if item.DmgS != nil || item.DmgM != nil || item.Critical != nil {
 		desc.WriteString("Combat Stats:\n")
 		if item.DmgS != nil {
-			desc.WriteString(fmt.Sprintf("Damage (Small): %s\n", *item.DmgS))
+			fmt.Fprintf(&desc, "Damage (Small): %s\n", *item.DmgS)
 		}
 		if item.DmgM != nil {
-			desc.WriteString(fmt.Sprintf("Damage (Medium): %s\n", *item.DmgM))
+			fmt.Fprintf(&desc, "Damage (Medium): %s\n", *item.DmgM)
 		}
 		if item.Critical != nil {
-			desc.WriteString(fmt.Sprintf("Critical: %s\n", *item.Critical))
+			fmt.Fprintf(&desc, "Critical: %s\n", *item.Critical)
 		}
 		if item.RangeIncrement != nil {
-			desc.WriteString(fmt.Sprintf("Range Increment: %s\n", *item.RangeIncrement))
+			fmt.Fprintf(&desc, "Range Increment: %s\n", *item.RangeIncrement)
 		}
 		desc.WriteString("\n")
 	}
@@ -114,22 +114,22 @@ func formatEquipmentDescription(item *mysql.Equipment) string {
 	if item.ArmorShieldBonus != nil || item.MaximumDexBonus != nil || item.ArmorCheckPenalty != nil {
 		desc.WriteString("Armor Stats:\n")
 		if item.ArmorShieldBonus != nil {
-			desc.WriteString(fmt.Sprintf("Armor/Shield Bonus: %s\n", *item.ArmorShieldBonus))
+			fmt.Fprintf(&desc, "Armor/Shield Bonus: %s\n", *item.ArmorShieldBonus)
 		}
 		if item.MaximumDexBonus != nil {
-			desc.WriteString(fmt.Sprintf("Maximum Dex Bonus: %s\n", *item.MaximumDexBonus))
+			fmt.Fprintf(&desc, "Maximum Dex Bonus: %s\n", *item.MaximumDexBonus)
 		}
 		if item.ArmorCheckPenalty != nil {
-			desc.WriteString(fmt.Sprintf("Armor Check Penalty: %s\n", *item.ArmorCheckPenalty))
+			fmt.Fprintf(&desc, "Armor Check Penalty: %s\n", *item.ArmorCheckPenalty)
 		}
 		if item.ArcaneSpellFailureChance != nil {
-			desc.WriteString(fmt.Sprintf("Arcane Spell Failure: %s\n", *item.ArcaneSpellFailureChance))
+			fmt.Fprintf(&desc, "Arcane Spell Failure: %s\n", *item.ArcaneSpellFailureChance)
 		}
 		if item.Speed30 != nil {
-			desc.WriteString(fmt.Sprintf("Speed (30 ft): %s\n", *item.Speed30))
+			fmt.Fprintf(&desc, "Speed (30 ft): %s\n", *item.Speed30)
 		}
 		if item.Speed20 != nil {
-			desc.WriteString(fmt.Sprintf("Speed (20 ft): %s\n", *item.Speed20))
+			fmt.Fprintf(&desc, "Speed (20 ft): %s\n", *item.Speed20)
 		}
 		desc.WriteString("\n")
 	}
@@ -141,7 +141,7 @@ func formatEquipmentDescription(item *mysql.Equipment) string {
 	}
 
 	if item.Reference != nil && *item.Reference != "" {
-		desc.WriteString(fmt.Sprintf("Source: %s", *item.Reference))
+		fmt.Fprintf(&desc, "Source: %s", *item.Reference)
 	}
 
 	return desc.String()

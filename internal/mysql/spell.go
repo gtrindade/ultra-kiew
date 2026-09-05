@@ -96,7 +96,7 @@ func (c *Client) GetSpellByName(name string) ([]*Spell, error) {
 				s.name, r.name
 `, "%"+name+"%")
 	if err != nil {
-		return nil, fmt.Errorf("failed to query spells: %v", err)
+		return nil, fmt.Errorf("failed to query spells: %w", err)
 	}
 	defer rows.Close()
 
@@ -118,13 +118,13 @@ func (c *Client) GetSpellByName(name string) ([]*Spell, error) {
 			&spell.SpellResistance,
 			&spell.ExtraComponents,
 		); err != nil {
-			return nil, fmt.Errorf("failed to scan spell: %v", err)
+			return nil, fmt.Errorf("failed to scan spell: %w", err)
 		}
 		spells = append(spells, &spell)
 	}
 
 	if err = rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating over rows: %v", err)
+		return nil, fmt.Errorf("error iterating over rows: %w", err)
 	}
 
 	if len(spells) == 0 {

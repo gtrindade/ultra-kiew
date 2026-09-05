@@ -44,7 +44,7 @@ func (c *Client) GetItemsByName(name string) ([]*Item, error) {
 		WHERE name LIKE ?
 	`, "%"+name+"%")
 	if err != nil {
-		return nil, fmt.Errorf("failed to query items: %v", err)
+		return nil, fmt.Errorf("failed to query items: %w", err)
 	}
 	defer rows.Close()
 
@@ -66,13 +66,13 @@ func (c *Client) GetItemsByName(name string) ([]*Item, error) {
 			&item.FullText,
 			&item.Reference,
 		); err != nil {
-			return nil, fmt.Errorf("failed to scan item: %v", err)
+			return nil, fmt.Errorf("failed to scan item: %w", err)
 		}
 		items = append(items, &item)
 	}
 
 	if err = rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating over rows: %v", err)
+		return nil, fmt.Errorf("error iterating over rows: %w", err)
 	}
 
 	if len(items) == 0 {

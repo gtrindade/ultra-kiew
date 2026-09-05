@@ -46,7 +46,7 @@ func (c *Client) MonsterLookup(args map[string]any) (string, error) {
 
 	monsters, err := c.dbClient.GetMonstersByName(monsterName)
 	if err != nil {
-		return "", fmt.Errorf("failed to get monsters from database: %v", err)
+		return "", fmt.Errorf("failed to get monsters from database: %w", err)
 	}
 
 	if len(monsters) == 0 {
@@ -69,9 +69,9 @@ func formatMonsterDescription(monster *mysql.Monster) string {
 	var desc strings.Builder
 
 	// Header with name and type information
-	desc.WriteString(fmt.Sprintf("%s", monster.Name))
+	desc.WriteString(monster.Name)
 	if monster.Altname != nil && *monster.Altname != "" {
-		desc.WriteString(fmt.Sprintf(" (%s)", *monster.Altname))
+		fmt.Fprintf(&desc, " (%s)", *monster.Altname)
 	}
 	desc.WriteString("\n\n")
 
@@ -95,47 +95,47 @@ func formatMonsterDescription(monster *mysql.Monster) string {
 
 	// Combat stats
 	if monster.HitDice != nil && *monster.HitDice != "" {
-		desc.WriteString(fmt.Sprintf("Hit Dice: %s\n", *monster.HitDice))
+		fmt.Fprintf(&desc, "Hit Dice: %s\n", *monster.HitDice)
 	}
 	if monster.Initiative != nil && *monster.Initiative != "" {
-		desc.WriteString(fmt.Sprintf("Initiative: %s\n", *monster.Initiative))
+		fmt.Fprintf(&desc, "Initiative: %s\n", *monster.Initiative)
 	}
 	if monster.Speed != nil && *monster.Speed != "" {
-		desc.WriteString(fmt.Sprintf("Speed: %s\n", *monster.Speed))
+		fmt.Fprintf(&desc, "Speed: %s\n", *monster.Speed)
 	}
 	if monster.ArmorClass != nil && *monster.ArmorClass != "" {
-		desc.WriteString(fmt.Sprintf("Armor Class: %s\n", *monster.ArmorClass))
+		fmt.Fprintf(&desc, "Armor Class: %s\n", *monster.ArmorClass)
 	}
 	desc.WriteString("\n")
 
 	// Attack information
 	if monster.BaseAttack != nil && *monster.BaseAttack != "" {
-		desc.WriteString(fmt.Sprintf("Base Attack/Grapple: %s", *monster.BaseAttack))
+		fmt.Fprintf(&desc, "Base Attack/Grapple: %s", *monster.BaseAttack)
 		if monster.Grapple != nil && *monster.Grapple != "" {
-			desc.WriteString(fmt.Sprintf("/%s", *monster.Grapple))
+			fmt.Fprintf(&desc, "/%s", *monster.Grapple)
 		}
 		desc.WriteString("\n")
 	}
 	if monster.Attack != nil && *monster.Attack != "" {
-		desc.WriteString(fmt.Sprintf("Attack: %s\n", *monster.Attack))
+		fmt.Fprintf(&desc, "Attack: %s\n", *monster.Attack)
 	}
 	if monster.FullAttack != nil && *monster.FullAttack != "" {
-		desc.WriteString(fmt.Sprintf("Full Attack: %s\n", *monster.FullAttack))
+		fmt.Fprintf(&desc, "Full Attack: %s\n", *monster.FullAttack)
 	}
 	if monster.Space != nil && *monster.Space != "" {
-		desc.WriteString(fmt.Sprintf("Space: %s\n", *monster.Space))
+		fmt.Fprintf(&desc, "Space: %s\n", *monster.Space)
 	}
 	if monster.Reach != nil && *monster.Reach != "" {
-		desc.WriteString(fmt.Sprintf("Reach: %s\n", *monster.Reach))
+		fmt.Fprintf(&desc, "Reach: %s\n", *monster.Reach)
 	}
 	desc.WriteString("\n")
 
 	// Special abilities
 	if monster.SpecialAttacks != nil && *monster.SpecialAttacks != "" {
-		desc.WriteString(fmt.Sprintf("Special Attacks: %s\n", *monster.SpecialAttacks))
+		fmt.Fprintf(&desc, "Special Attacks: %s\n", *monster.SpecialAttacks)
 	}
 	if monster.SpecialQualities != nil && *monster.SpecialQualities != "" {
-		desc.WriteString(fmt.Sprintf("Special Qualities: %s\n", *monster.SpecialQualities))
+		fmt.Fprintf(&desc, "Special Qualities: %s\n", *monster.SpecialQualities)
 	}
 	if monster.SpecialAbilities != nil && *monster.SpecialAbilities != "" {
 		desc.WriteString("Special Abilities:\n")
@@ -146,52 +146,52 @@ func formatMonsterDescription(monster *mysql.Monster) string {
 
 	// Saves and abilities
 	if monster.Saves != nil && *monster.Saves != "" {
-		desc.WriteString(fmt.Sprintf("Saves: %s\n", *monster.Saves))
+		fmt.Fprintf(&desc, "Saves: %s\n", *monster.Saves)
 	}
 	if monster.Abilities != nil && *monster.Abilities != "" {
-		desc.WriteString(fmt.Sprintf("Abilities: %s\n", *monster.Abilities))
+		fmt.Fprintf(&desc, "Abilities: %s\n", *monster.Abilities)
 	}
 	desc.WriteString("\n")
 
 	// Skills and feats
 	if monster.Skills != nil && *monster.Skills != "" {
-		desc.WriteString(fmt.Sprintf("Skills: %s\n", *monster.Skills))
+		fmt.Fprintf(&desc, "Skills: %s\n", *monster.Skills)
 	}
 	if monster.Feats != nil && *monster.Feats != "" {
-		desc.WriteString(fmt.Sprintf("Feats: %s\n", *monster.Feats))
+		fmt.Fprintf(&desc, "Feats: %s\n", *monster.Feats)
 	}
 	if monster.BonusFeats != nil && *monster.BonusFeats != "" {
-		desc.WriteString(fmt.Sprintf("Bonus Feats: %s\n", *monster.BonusFeats))
+		fmt.Fprintf(&desc, "Bonus Feats: %s\n", *monster.BonusFeats)
 	}
 	if monster.EpicFeats != nil && *monster.EpicFeats != "" {
-		desc.WriteString(fmt.Sprintf("Epic Feats: %s\n", *monster.EpicFeats))
+		fmt.Fprintf(&desc, "Epic Feats: %s\n", *monster.EpicFeats)
 	}
 	desc.WriteString("\n")
 
 	// Environment and organization
 	if monster.Environment != nil && *monster.Environment != "" {
-		desc.WriteString(fmt.Sprintf("Environment: %s\n", *monster.Environment))
+		fmt.Fprintf(&desc, "Environment: %s\n", *monster.Environment)
 	}
 	if monster.Organization != nil && *monster.Organization != "" {
-		desc.WriteString(fmt.Sprintf("Organization: %s\n", *monster.Organization))
+		fmt.Fprintf(&desc, "Organization: %s\n", *monster.Organization)
 	}
 	desc.WriteString("\n")
 
 	// Challenge and advancement
 	if monster.ChallengeRating != nil && *monster.ChallengeRating != "" {
-		desc.WriteString(fmt.Sprintf("Challenge Rating: %s\n", *monster.ChallengeRating))
+		fmt.Fprintf(&desc, "Challenge Rating: %s\n", *monster.ChallengeRating)
 	}
 	if monster.Treasure != nil && *monster.Treasure != "" {
-		desc.WriteString(fmt.Sprintf("Treasure: %s\n", *monster.Treasure))
+		fmt.Fprintf(&desc, "Treasure: %s\n", *monster.Treasure)
 	}
 	if monster.Alignment != nil && *monster.Alignment != "" {
-		desc.WriteString(fmt.Sprintf("Alignment: %s\n", *monster.Alignment))
+		fmt.Fprintf(&desc, "Alignment: %s\n", *monster.Alignment)
 	}
 	if monster.Advancement != nil && *monster.Advancement != "" {
-		desc.WriteString(fmt.Sprintf("Advancement: %s\n", *monster.Advancement))
+		fmt.Fprintf(&desc, "Advancement: %s\n", *monster.Advancement)
 	}
 	if monster.LevelAdjustment != nil && *monster.LevelAdjustment != "" {
-		desc.WriteString(fmt.Sprintf("Level Adjustment: %s\n", *monster.LevelAdjustment))
+		fmt.Fprintf(&desc, "Level Adjustment: %s\n", *monster.LevelAdjustment)
 	}
 	desc.WriteString("\n")
 
@@ -202,7 +202,7 @@ func formatMonsterDescription(monster *mysql.Monster) string {
 		desc.WriteString("\n\n")
 	}
 	if monster.Reference != nil && *monster.Reference != "" {
-		desc.WriteString(fmt.Sprintf("Source: %s", *monster.Reference))
+		fmt.Fprintf(&desc, "Source: %s", *monster.Reference)
 	}
 
 	return desc.String()

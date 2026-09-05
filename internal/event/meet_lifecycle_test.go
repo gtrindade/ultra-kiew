@@ -1,0 +1,585 @@
+package event
+
+import (
+	"context"
+	"fmt"
+	"testing"
+	"time"
+
+	"github.com/gtrindade/ultra-kiew/internal/meet"
+)
+
+// fakeMeet is a scriptable MeetClient: each field is a canned answer, and
+// CreateSpaceCalls/other counters let a test assert on retry behaviour without
+// touching the network.
+type fakeMeet struct {
+	createErr        error
+	spaceName        string
+	joinURI          string
+	createSpaceCalls int
+
+	records []meet.ConferenceRecord
+	listErr error
+
+	transcriptLinks     map[string][]string // by conference record name
+	notesLinks          map[string][]string
+	transcriptLinkCalls int
+	notesLinkCalls      int
+
+	participants      map[string][]meet.Participant // by conference record name
+	participantsErr   error
+	participantsCalls int
+}
+
+func (f *fakeMeet) CreateSpace(ctx context.Context) (string, string, error) {
+	f.createSpaceCalls++
+	if f.createErr != nil {
+		return "", "", f.createErr
+	}
+	return f.spaceName, f.joinURI, nil
+}
+
+func (f *fakeMeet) ListConferenceRecords(ctx context.Context, spaceName string) ([]meet.ConferenceRecord, error) {
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	return f.records, nil
+}
+
+func (f *fakeMeet) TranscriptLinks(ctx context.Context, recordName string) ([]string, error) {
+	f.transcriptLinkCalls++
+	return f.transcriptLinks[recordName], nil
+}
+
+func (f *fakeMeet) SmartNotesLinks(ctx context.Context, recordName string) ([]string, error) {
+	f.notesLinkCalls++
+	return f.notesLinks[recordName], nil
+}
+
+func (f *fakeMeet) ListParticipants(ctx context.Context, recordName string) ([]meet.Participant, error) {
+	f.participantsCalls++
+	if f.participantsErr != nil {
+		return nil, f.participantsErr
+	}
+	return f.participants[recordName], nil
+}
+
+func newTestManager(t *testing.T, fm *fakeMeet) *Manager {
+	t.Helper()
+	m := NewManager(setupTestStorage(t, "America/Sao_Paulo"))
+	m.meet = fm
+	return m
+}
+
+// A session still running (no end time on its one record) must not finalize,
+// no matter how many ticks pass -- otherwise a recap would post mid-session.
+func TestAdvanceMeetSessionStaysLiveWhileRecordIsOpen(t *testing.T) {
+	fm := &fakeMeet{records: []meet.ConferenceRecord{{Name: "conferenceRecords/abc", StartTime: time.Now().Format(time.RFC3339)}}}
+	m := newTestManager(t, fm)
+
+	ev := Event{
+		Summary:   "Sessão de teste",
+		Timestamp: time.Now().Add(-1 * time.Hour).Unix(), // well under the hard cap
+		Meet:      &MeetInfo{SpaceName: "spaces/xyz"},
+	}
+	now := time.Now().Unix()
+
+	updated, finalized, changed := m.advanceMeetSession(context.Background(), "-100", ev, now)
+
+	if finalized {
+		t.Fatal("session should not finalize while a conference record is still open")
+	}
+	if !changed {
+		t.Fatal("expected the new conference record to be persisted")
+	}
+	if len(updated.Meet.Segments) != 1 {
+		t.Fatalf("expected 1 segment recorded, got %v", updated.Meet.Segments)
+	}
+}
+
+// The whole point of the grace period: a record ending must not immediately
+// finalize the session, because a pizza break looks identical at that instant
+// to the session actually being over.
+func TestAdvanceMeetSessionWaitsOutGracePeriodAfterRecordEnds(t *testing.T) {
+	recordName := "conferenceRecords/abc"
+	endTime := time.Now().Add(-5 * time.Minute) // ended recently, inside the grace window
+	fm := &fakeMeet{records: []meet.ConferenceRecord{{Name: recordName, EndTime: endTime.Format(time.RFC3339)}}}
+	m := newTestManager(t, fm)
+
+	ev := Event{
+		Summary:   "Sessão de teste",
+		Timestamp: time.Now().Add(-1 * time.Hour).Unix(), // well under the hard cap
+		Meet:      &MeetInfo{SpaceName: "spaces/xyz"},
+	}
+	now := time.Now().Unix()
+
+	updated, finalized, _ := m.advanceMeetSession(context.Background(), "-100", ev, now)
+
+	if finalized {
+		t.Fatal("session should not finalize before the grace period has elapsed")
+	}
+	if updated.Meet.SessionEnded {
+		t.Fatal("SessionEnded should not latch until the grace period has elapsed")
+	}
+}
+
+// Past the grace period, with no reconnect, the session is over and the recap
+// step should run (and, with no links available, finalize immediately rather
+// than waiting the full artifact timeout for nothing).
+func TestAdvanceMeetSessionFinalizesAfterGracePeriodWithNoRecap(t *testing.T) {
+	recordName := "conferenceRecords/abc"
+	endTime := time.Now().Add(-(meetGracePeriod + time.Minute))
+	fm := &fakeMeet{
+		records:         []meet.ConferenceRecord{{Name: recordName, EndTime: endTime.Format(time.RFC3339)}},
+		transcriptLinks: map[string][]string{recordName: {"https://docs.google.com/transcript"}},
+	}
+	m := newTestManager(t, fm)
+
+	ev := Event{Summary: "Sessão de teste", Meet: &MeetInfo{SpaceName: "spaces/xyz"}}
+	now := time.Now().Unix()
+
+	updated, finalized, _ := m.advanceMeetSession(context.Background(), "-100", ev, now)
+
+	if !finalized {
+		t.Fatal("expected the session to finalize once the grace period has passed and a link was found")
+	}
+	if !updated.Meet.RecapPosted {
+		t.Fatal("expected RecapPosted to be set")
+	}
+	if len(updated.Meet.Segments) != 1 || len(updated.Meet.Segments[0].TranscriptLinks) != 1 {
+		t.Fatalf("expected the transcript link to be recorded, got %+v", updated.Meet.Segments)
+	}
+}
+
+// If nobody ever joins, Segments stays empty -- SessionEnded should still
+// latch after meetNoShowGrace (there is no session to keep watching), but
+// this must NOT finalize and post "não encontrei" immediately. A transient
+// empty response from ListConferenceRecords right as a real meeting starts
+// looks identical to a genuine no-show, and RecapPosted latches permanently:
+// an instant give-up here can never be corrected once the real conference
+// record (and its transcript) shows up moments later. See
+// TestAdvanceMeetSessionEventuallyGivesUpOnAGenuineNoShow for the case where
+// it should finalize.
+func TestAdvanceMeetSessionDoesNotFinalizeImmediatelyOnApparentNoShow(t *testing.T) {
+	fm := &fakeMeet{records: nil}
+	m := newTestManager(t, fm)
+
+	ev := Event{
+		Summary:   "Sessão de teste",
+		Timestamp: time.Now().Add(-(meetNoShowGrace + time.Minute)).Unix(),
+		Meet:      &MeetInfo{SpaceName: "spaces/xyz"},
+	}
+	now := time.Now().Unix()
+
+	updated, finalized, _ := m.advanceMeetSession(context.Background(), "-100", ev, now)
+
+	if !updated.Meet.SessionEnded {
+		t.Fatal("expected SessionEnded to latch after meetNoShowGrace with zero records seen")
+	}
+	if finalized {
+		t.Fatal("must not finalize (and post 'não encontrei') the instant no-show grace elapses -- that read of the API could be wrong")
+	}
+	if updated.Meet.RecapPosted {
+		t.Fatal("must not post a recap yet")
+	}
+}
+
+// Past meetArtifactMaxWait with genuinely zero records ever seen, it must
+// still eventually give up rather than tracking the event forever.
+func TestAdvanceMeetSessionEventuallyGivesUpOnAGenuineNoShow(t *testing.T) {
+	fm := &fakeMeet{records: nil}
+	m := newTestManager(t, fm)
+
+	now := time.Now().Unix()
+	ev := Event{
+		Summary: "Sessão de teste",
+		Meet: &MeetInfo{
+			SpaceName:      "spaces/xyz",
+			SessionEnded:   true,
+			SessionEndedAt: now - int64((meetArtifactMaxWait + time.Minute).Seconds()),
+		},
+	}
+
+	updated, finalized, _ := m.advanceMeetSession(context.Background(), "-100", ev, now)
+
+	if !finalized {
+		t.Fatal("expected a genuine no-show to finalize once meetArtifactMaxWait has passed")
+	}
+	if !updated.Meet.RecapPosted {
+		t.Fatal("expected a recap (even an empty one) to be posted")
+	}
+}
+
+// A record that never gets an end time must not pin the event forever.
+func TestAdvanceMeetSessionHitsHardCap(t *testing.T) {
+	recordName := "conferenceRecords/stuck"
+	fm := &fakeMeet{records: []meet.ConferenceRecord{{Name: recordName}}} // no EndTime, ever
+	m := newTestManager(t, fm)
+
+	ev := Event{
+		Summary:   "Sessão de teste",
+		Timestamp: time.Now().Add(-(meetMaxSessionLength + time.Minute)).Unix(),
+		Meet:      &MeetInfo{SpaceName: "spaces/xyz", Segments: []MeetSegment{{RecordName: recordName}}},
+	}
+	now := time.Now().Unix()
+
+	updated, finalized, _ := m.advanceMeetSession(context.Background(), "-100", ev, now)
+
+	if !finalized {
+		t.Fatal("expected the hard cap to force finalization of a stuck session")
+	}
+	if !updated.Meet.SessionEnded {
+		t.Fatal("expected SessionEnded to be set by the hard cap")
+	}
+}
+
+// A long session (these run up to several hours) must not have its transcript
+// check give up after 30 minutes -- it must keep trying for up to
+// meetArtifactMaxWait (24h), and it must not do so by hammering the API once a
+// minute for that whole window: the check should only actually run once every
+// meetArtifactPollInterval.
+func TestAdvanceMeetSessionPacesArtifactChecksRatherThanPollingEveryTick(t *testing.T) {
+	fm := &fakeMeet{}
+	m := newTestManager(t, fm)
+
+	now := time.Now().Unix()
+	ev := Event{
+		Summary: "Sessão longa",
+		Meet: &MeetInfo{
+			SpaceName:      "spaces/xyz",
+			Segments:       []MeetSegment{{RecordName: "conferenceRecords/abc"}},
+			SessionEnded:   true,
+			SessionEndedAt: now - 60, // ended a minute ago
+		},
+	}
+
+	// First tick after the session ends: no LastArtifactPollAt yet, so the
+	// check must run immediately rather than waiting a full interval.
+	updated, finalized, _ := m.advanceMeetSession(context.Background(), "-100", ev, now)
+	if finalized {
+		t.Fatal("should still be waiting, well within meetArtifactMaxWait")
+	}
+	if fm.transcriptLinkCalls != 1 || fm.notesLinkCalls != 1 {
+		t.Fatalf("expected exactly one check on the first tick, got %d/%d", fm.transcriptLinkCalls, fm.notesLinkCalls)
+	}
+	if updated.Meet.LastArtifactPollAt != now {
+		t.Fatalf("expected LastArtifactPollAt to be recorded, got %d", updated.Meet.LastArtifactPollAt)
+	}
+
+	// A tick 1 minute later (as the real ticker runs) must NOT check again --
+	// meetArtifactPollInterval has not elapsed.
+	soonAfter := now + 60
+	updated, _, _ = m.advanceMeetSession(context.Background(), "-100", updated, soonAfter)
+	if fm.transcriptLinkCalls != 1 || fm.notesLinkCalls != 1 {
+		t.Fatalf("expected no additional check before the poll interval elapses, got %d/%d", fm.transcriptLinkCalls, fm.notesLinkCalls)
+	}
+
+	// Once meetArtifactPollInterval has actually elapsed, it should check again.
+	afterInterval := now + int64(meetArtifactPollInterval.Seconds()) + 1
+	updated, _, _ = m.advanceMeetSession(context.Background(), "-100", updated, afterInterval)
+	if fm.transcriptLinkCalls != 2 || fm.notesLinkCalls != 2 {
+		t.Fatalf("expected a second check after the poll interval elapsed, got %d/%d", fm.transcriptLinkCalls, fm.notesLinkCalls)
+	}
+	if updated.Meet.LastArtifactPollAt != afterInterval {
+		t.Fatalf("expected LastArtifactPollAt to advance, got %d", updated.Meet.LastArtifactPollAt)
+	}
+}
+
+// Once the session has ended but no links have shown up yet, the event must
+// stay live (not finalize) until either a link appears or the artifact wait
+// expires -- otherwise a recap could be posted with no chance for the
+// transcript to land.
+func TestAdvanceMeetSessionWaitsForArtifactsBeforeGivingUp(t *testing.T) {
+	fm := &fakeMeet{}
+	m := newTestManager(t, fm)
+
+	now := time.Now().Unix()
+	ev := Event{
+		Summary: "Sessão de teste",
+		Meet: &MeetInfo{
+			SpaceName:      "spaces/xyz",
+			Segments:       []MeetSegment{{RecordName: "conferenceRecords/abc"}},
+			SessionEnded:   true,
+			SessionEndedAt: now - int64((meetArtifactMaxWait - time.Minute).Seconds()),
+		},
+	}
+
+	updated, finalized, _ := m.advanceMeetSession(context.Background(), "-100", ev, now)
+
+	if finalized {
+		t.Fatal("should still be waiting for artifacts within meetArtifactMaxWait")
+	}
+	if updated.Meet.RecapPosted {
+		t.Fatal("recap should not post while still within the artifact wait window")
+	}
+}
+
+// Past meetArtifactMaxWait with no links ever showing up, the recap must
+// still post (saying nothing was found) rather than waiting forever.
+func TestAdvanceMeetSessionGivesUpWaitingForArtifacts(t *testing.T) {
+	fm := &fakeMeet{}
+	m := newTestManager(t, fm)
+
+	now := time.Now().Unix()
+	ev := Event{
+		Summary: "Sessão de teste",
+		Meet: &MeetInfo{
+			SpaceName:      "spaces/xyz",
+			Segments:       []MeetSegment{{RecordName: "conferenceRecords/abc"}},
+			SessionEnded:   true,
+			SessionEndedAt: now - int64((meetArtifactMaxWait + time.Minute).Seconds()),
+		},
+	}
+
+	updated, finalized, _ := m.advanceMeetSession(context.Background(), "-100", ev, now)
+
+	if !finalized {
+		t.Fatal("expected finalization once meetArtifactMaxWait has passed")
+	}
+	if !updated.Meet.RecapPosted {
+		t.Fatal("expected a recap to be posted even with no links found")
+	}
+}
+
+// An event with Meet integration unavailable for its whole life (ev.Meet ==
+// nil) must finalize immediately -- there is nothing to wait for.
+func TestAdvanceMeetSessionFinalizesImmediatelyWithNoMeet(t *testing.T) {
+	m := newTestManager(t, &fakeMeet{})
+	ev := Event{Summary: "Sessão sem Meet"}
+
+	updated, finalized, changed := m.advanceMeetSession(context.Background(), "-100", ev, time.Now().Unix())
+
+	if !finalized {
+		t.Fatal("an event with no Meet info should finalize on its first post-start tick")
+	}
+	if changed {
+		t.Fatal("nothing should have been mutated")
+	}
+	if updated.Meet != nil {
+		t.Fatal("Meet should remain nil")
+	}
+}
+
+// runMonitorTick end-to-end: space creation is retried tick over tick until it
+// succeeds, and once it does it is never attempted again.
+func TestRunMonitorTickCreatesMeetSpaceOnceThenStops(t *testing.T) {
+	fm := &fakeMeet{createErr: fmt.Errorf("temporary outage")}
+	m := newTestManager(t, fm)
+
+	if _, err := m.Manage(groupArgs(map[string]any{
+		"action":         "create",
+		"local_datetime": tomorrowAt(21),
+	})); err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+
+	m.runMonitorTick(context.Background())
+	if fm.createSpaceCalls != 1 {
+		t.Fatalf("expected 1 create attempt after first tick, got %d", fm.createSpaceCalls)
+	}
+
+	events := make(map[string]Event)
+	m.storage.LoadFromDB(eventsFileName, &events)
+	if events[fmt.Sprintf("%d", testGroupChatID)].Meet != nil {
+		t.Fatal("Meet should still be nil after a failed create attempt")
+	}
+
+	// Second tick: creation now succeeds.
+	fm.createErr = nil
+	fm.spaceName, fm.joinURI = "spaces/xyz", "https://meet.google.com/abc-defg-hij"
+	m.runMonitorTick(context.Background())
+	if fm.createSpaceCalls != 2 {
+		t.Fatalf("expected a second create attempt, got %d calls", fm.createSpaceCalls)
+	}
+
+	m.storage.LoadFromDB(eventsFileName, &events)
+	ev := events[fmt.Sprintf("%d", testGroupChatID)]
+	if ev.Meet == nil || ev.Meet.JoinURI != fm.joinURI {
+		t.Fatalf("expected the event to record the created space, got %+v", ev.Meet)
+	}
+
+	// Third tick: must not create a second space now that one exists.
+	m.runMonitorTick(context.Background())
+	if fm.createSpaceCalls != 2 {
+		t.Fatalf("expected no further create attempts once a space exists, got %d calls", fm.createSpaceCalls)
+	}
+}
+
+// The exact case reported in production: a session that reconnected once
+// produces two conference records, and with both transcription and "Take
+// notes for me" on, Google gives each record ONE combined doc rather than a
+// separate transcript doc and notes doc -- so it shows up under both labels
+// with the same URL. That must collapse to one link per record (two links
+// total here), not four.
+func TestDedupeMeetLinksCollapsesTheSameDocListedAsBothNotesAndTranscript(t *testing.T) {
+	notes := []string{
+		"https://docs.google.com/document/d/1Hrya.../edit",
+		"https://docs.google.com/document/d/1COuY.../edit",
+	}
+	transcripts := []string{
+		"https://docs.google.com/document/d/1Hrya.../edit",
+		"https://docs.google.com/document/d/1COuY.../edit",
+	}
+
+	got := dedupeMeetLinks(notes, transcripts)
+
+	if len(got) != 2 {
+		t.Fatalf("expected the 4 links to collapse to 2 (one per session segment), got %d: %v", len(got), got)
+	}
+	for _, want := range notes {
+		found := false
+		for _, g := range got {
+			if g == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("expected %q to survive deduplication, got %v", want, got)
+		}
+	}
+}
+
+// Two conference records with genuinely different docs (no reconnect, or a
+// meeting where notes and transcript were never merged) must not be
+// collapsed into each other.
+func TestDedupeMeetLinksKeepsGenuinelyDifferentDocs(t *testing.T) {
+	notes := []string{"https://docs.google.com/document/d/notes-a/edit"}
+	transcripts := []string{"https://docs.google.com/document/d/transcript-a/edit"}
+
+	got := dedupeMeetLinks(notes, transcripts)
+
+	if len(got) != 2 {
+		t.Fatalf("expected both distinct links to survive, got %d: %v", len(got), got)
+	}
+}
+
+// This is the label that lets a reader tell a several-second Meet
+// language-switch artifact apart from the real multi-hour session without
+// opening either link -- the whole point of the feature.
+func TestFormatSegmentDuration(t *testing.T) {
+	start := time.Date(2026, 8, 23, 20, 0, 0, 0, time.UTC)
+
+	cases := []struct {
+		name string
+		end  time.Time
+		want string
+	}{
+		{"a few seconds (the language-switch artifact)", start.Add(45 * time.Second), "45s"},
+		{"under a minute, rounds down", start.Add(59 * time.Second), "59s"},
+		{"a few minutes", start.Add(12 * time.Minute), "12min"},
+		{"just under an hour", start.Add(59 * time.Minute), "59min"},
+		{"exactly one hour", start.Add(1 * time.Hour), "1h"},
+		{"hours with leftover minutes", start.Add(3*time.Hour + 58*time.Minute), "3h58min"},
+		{"a long session", start.Add(6 * time.Hour), "6h"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := formatSegmentDuration(start.Format(time.RFC3339), tc.end.Format(time.RFC3339))
+			if got != tc.want {
+				t.Errorf("formatSegmentDuration(%s -> %s) = %q, want %q", start, tc.end, got, tc.want)
+			}
+		})
+	}
+}
+
+// Malformed or missing timestamps must degrade to no label, not a wrong one
+// or a crash -- this can legitimately happen if a segment reaches the recap
+// somehow without a resolved end time.
+func TestFormatSegmentDurationDegradesGracefullyOnBadInput(t *testing.T) {
+	validStart := time.Now().Format(time.RFC3339)
+
+	cases := []struct {
+		name  string
+		start string
+		end   string
+	}{
+		{"empty end time", validStart, ""},
+		{"empty start time", "", validStart},
+		{"garbage end time", validStart, "not-a-timestamp"},
+		{"end before start", validStart, time.Now().Add(-time.Hour).Format(time.RFC3339)},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := formatSegmentDuration(tc.start, tc.end); got != "" {
+				t.Errorf("expected empty string for bad input, got %q", got)
+			}
+		})
+	}
+}
+
+// A participant appearing present for the first time is a join, and must be
+// recorded so the same join is not reported again on the next check.
+func TestPollParticipantsDetectsAJoin(t *testing.T) {
+	recordName := "conferenceRecords/abc"
+	fm := &fakeMeet{participants: map[string][]meet.Participant{
+		recordName: {{Name: "participants/1", DisplayName: "Alice", Present: true}},
+	}}
+	m := newTestManager(t, fm)
+
+	meetInfo := &MeetInfo{Segments: []MeetSegment{{RecordName: recordName}}} // open: no EndTime
+	ev := Event{Summary: "Sessão de teste"}
+
+	changed := m.pollParticipants(context.Background(), "-100", ev, meetInfo)
+	if !changed {
+		t.Fatal("expected a new participant to count as a change")
+	}
+	if len(meetInfo.Participants) != 1 || !meetInfo.Participants[0].Present {
+		t.Fatalf("expected Alice recorded as present, got %+v", meetInfo.Participants)
+	}
+
+	// Polling again with the same state must not report a second "change" --
+	// it is exactly the same information already stored.
+	changed = m.pollParticipants(context.Background(), "-100", ev, meetInfo)
+	if changed {
+		t.Fatal("expected no change on a repeat poll with the same state")
+	}
+}
+
+// A participant who was present and now is not is a leave.
+func TestPollParticipantsDetectsALeave(t *testing.T) {
+	recordName := "conferenceRecords/abc"
+	fm := &fakeMeet{}
+	m := newTestManager(t, fm)
+
+	meetInfo := &MeetInfo{
+		Segments:     []MeetSegment{{RecordName: recordName}},
+		Participants: []ParticipantStatus{{Name: "participants/1", DisplayName: "Alice", Present: true}},
+	}
+	ev := Event{Summary: "Sessão de teste"}
+
+	fm.participants = map[string][]meet.Participant{
+		recordName: {{Name: "participants/1", DisplayName: "Alice", Present: false}},
+	}
+
+	changed := m.pollParticipants(context.Background(), "-100", ev, meetInfo)
+	if !changed {
+		t.Fatal("expected a presence flip to count as a change")
+	}
+	if meetInfo.Participants[0].Present {
+		t.Fatal("expected Alice's stored status to update to not-present")
+	}
+}
+
+// A segment that already ended has nothing live left to check -- polling it
+// would just be asking about a call that is already over.
+func TestPollParticipantsSkipsClosedSegments(t *testing.T) {
+	recordName := "conferenceRecords/abc"
+	fm := &fakeMeet{participants: map[string][]meet.Participant{
+		recordName: {{Name: "participants/1", DisplayName: "Alice", Present: true}},
+	}}
+	m := newTestManager(t, fm)
+
+	meetInfo := &MeetInfo{Segments: []MeetSegment{{RecordName: recordName, EndTime: time.Now().Format(time.RFC3339)}}}
+	ev := Event{Summary: "Sessão de teste"}
+
+	m.pollParticipants(context.Background(), "-100", ev, meetInfo)
+
+	if fm.participantsCalls != 0 {
+		t.Fatalf("expected no participants call for a closed segment, got %d", fm.participantsCalls)
+	}
+	if len(meetInfo.Participants) != 0 {
+		t.Fatalf("expected no participants tracked for a closed segment, got %+v", meetInfo.Participants)
+	}
+}

@@ -52,7 +52,7 @@ func (c *Client) GetSkillsByName(name string) ([]*Skill, error) {
 		WHERE name LIKE ?
 	`, "%"+name+"%")
 	if err != nil {
-		return nil, fmt.Errorf("failed to query skills: %v", err)
+		return nil, fmt.Errorf("failed to query skills: %w", err)
 	}
 	defer rows.Close()
 
@@ -78,13 +78,13 @@ func (c *Client) GetSkillsByName(name string) ([]*Skill, error) {
 			&skill.FullText,
 			&skill.Reference,
 		); err != nil {
-			return nil, fmt.Errorf("failed to scan skill: %v", err)
+			return nil, fmt.Errorf("failed to scan skill: %w", err)
 		}
 		skills = append(skills, &skill)
 	}
 
 	if err = rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating over rows: %v", err)
+		return nil, fmt.Errorf("error iterating over rows: %w", err)
 	}
 
 	if len(skills) == 0 {

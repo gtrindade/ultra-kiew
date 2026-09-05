@@ -50,7 +50,7 @@ func (c *Client) GetFeatByName(name string) ([]*Feat, error) {
 			f.id, f.name, f.description, f.benefit, f.special, f.normal, r.name
 	`, "%"+name+"%")
 	if err != nil {
-		return nil, fmt.Errorf("failed to query feats: %v", err)
+		return nil, fmt.Errorf("failed to query feats: %w", err)
 	}
 	defer rows.Close()
 
@@ -65,13 +65,13 @@ func (c *Client) GetFeatByName(name string) ([]*Feat, error) {
 			&feat.Source,
 			&feat.Categories,
 		); err != nil {
-			return nil, fmt.Errorf("failed to scan feat: %v", err)
+			return nil, fmt.Errorf("failed to scan feat: %w", err)
 		}
 		feats = append(feats, &feat)
 	}
 
 	if err = rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating over rows: %v", err)
+		return nil, fmt.Errorf("error iterating over rows: %w", err)
 	}
 
 	if len(feats) == 0 {
