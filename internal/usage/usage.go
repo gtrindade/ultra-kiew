@@ -31,9 +31,9 @@ const (
 	// can start from a clean one.
 	LogFileName = "usage.jsonl"
 
-	// DailyPromptLimit is how many prompts one person may spend in
-	// QuotaWindow. Event confirmations are deliberately not prompts, so
-	// answering an invite never costs anyone their quota.
+	// DailyPromptLimit is how many messages one person may spend in
+	// QuotaWindow. Every served turn costs one, with no exemptions -- see
+	// telegram.allowTurn for why there deliberately are none.
 	DailyPromptLimit = 50
 
 	// QuotaWindow is a rolling window rather than a calendar day: the quota
@@ -55,14 +55,8 @@ const (
 type Kind string
 
 const (
-	// KindPrompt is an ordinary turn, and the only kind that spends quota.
+	// KindPrompt is a served turn, and the only kind that spends quota.
 	KindPrompt Kind = "prompt"
-
-	// KindConfirmation is a turn whose only effect was answering an event
-	// invite. Excluded from the quota on purpose: telling the group whether
-	// you are coming is the bot's core job, and rationing it would be
-	// self-defeating.
-	KindConfirmation Kind = "confirmation"
 
 	// KindBlocked is a turn that was refused because the quota was already
 	// spent. Logged so "is the limit biting anyone?" is answerable, and never
@@ -181,17 +175,15 @@ func (r *Recorder) Allowance(user string) (remaining int, used int) {
 func QuotaMessage(used int) string {
 	return fmt.Sprintf(
 		"Você já usou %d mensagens comigo nas últimas 24 horas, que é o limite. "+
-			"A cota vai liberando aos poucos conforme as mensagens antigas completam 24h -- tenta de novo mais tarde. "+
-			"(Confirmar presença em evento não conta e continua funcionando normalmente.)",
+			"A cota vai liberando aos poucos conforme as mensagens antigas completam 24h -- tenta de novo mais tarde.",
 		used)
 }
 
 // userTotals is one row of a report.
 type userTotals struct {
-	User          string
-	Prompts       int
-	Confirmations int
-	Blocked       int
+	User    string
+	Prompts int
+	Blocked int
 }
 
 // Report is the aggregate answer for one window and scope.
@@ -207,13 +199,12 @@ type Report struct {
 }
 
 // Totals sums the rows.
-func (rep Report) Totals() (prompts, confirmations, blocked int) {
+func (rep Report) Totals() (prompts, blocked int) {
 	for _, row := range rep.Rows {
 		prompts += row.Prompts
-		confirmations += row.Confirmations
 		blocked += row.Blocked
 	}
-	return prompts, confirmations, blocked
+	return prompts, blocked
 }
 
 // Build aggregates the log for a window, optionally narrowed to one chat.
@@ -247,8 +238,6 @@ func (r *Recorder) Build(since, until time.Time, chatID int64) (Report, error) {
 		switch e.Kind {
 		case KindPrompt:
 			row.Prompts++
-		case KindConfirmation:
-			row.Confirmations++
 		case KindBlocked:
 			row.Blocked++
 		}
@@ -296,10 +285,7 @@ func (rep Report) Render() string {
 	}
 
 	for _, row := range rep.Rows {
-		fmt.Fprintf(&sb, "%s — %s", row.User, plural(row.Prompts, "prompt", "prompts"))
-		if row.Confirmations > 0 {
-			fmt.Fprintf(&sb, ", %s", plural(row.Confirmations, "confirmação", "confirmações"))
-		}
+		fmt.Fprintf(&sb, "%s — %s", row.User, plural(row.Prompts, "mensagem", "mensagens"))
 		if row.Blocked > 0 {
 			fmt.Fprintf(&sb, ", %s no limite", plural(row.Blocked, "bloqueada", "bloqueadas"))
 		}
@@ -309,16 +295,12 @@ func (rep Report) Render() string {
 		sb.WriteString("\n")
 	}
 
-	prompts, confirmations, blocked := rep.Totals()
+	prompts, blocked := rep.Totals()
 	fmt.Fprintf(&sb, "\nTotal: %s de %s",
-		plural(prompts, "prompt", "prompts"),
+		plural(prompts, "mensagem", "mensagens"),
 		plural(len(rep.Rows), "pessoa", "pessoas"))
 	if rep.ChatID == 0 && rep.Chats > 1 {
 		fmt.Fprintf(&sb, " em %d chats", rep.Chats)
-	}
-	if confirmations > 0 {
-		fmt.Fprintf(&sb, ", mais %s (não contam no limite)",
-			plural(confirmations, "confirmação", "confirmações"))
 	}
 	if blocked > 0 {
 		fmt.Fprintf(&sb, ". %s pelo limite de %d/24h",

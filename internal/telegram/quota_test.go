@@ -8,8 +8,6 @@ import (
 	"time"
 
 	"github.com/go-telegram/bot/models"
-	"github.com/gtrindade/ultra-kiew/internal/event"
-	"github.com/gtrindade/ultra-kiew/internal/googlegenai"
 	"github.com/gtrindade/ultra-kiew/internal/storage"
 	"github.com/gtrindade/ultra-kiew/internal/usage"
 )
@@ -32,7 +30,7 @@ func newUsageClient(t *testing.T) *Client {
 	return c
 }
 
-// spend writes n prompts for a user straight into the log, standing in for n
+// spend writes n messages for a user straight into the log, standing in for n
 // turns already served.
 func spend(c *Client, user string, n int) {
 	for range n {
@@ -75,7 +73,7 @@ func TestATurnIsServedWhileTheAllowanceHolds(t *testing.T) {
 	spend(c, "@alice", usage.DailyPromptLimit-1)
 
 	u := update(-100, "alice", "e aí", time.Now())
-	if !c.allowTurn(context.Background(), nil, u, "Shadowrun", false) {
+	if !c.allowTurn(context.Background(), nil, u, "Shadowrun") {
 		t.Fatal("expected the turn to be served with one message left")
 	}
 }
@@ -85,8 +83,39 @@ func TestATurnIsRefusedOnceTheAllowanceIsSpent(t *testing.T) {
 	spend(c, "@alice", usage.DailyPromptLimit)
 
 	u := update(-100, "alice", "e aí", time.Now())
-	if c.allowTurn(context.Background(), nil, u, "Shadowrun", false) {
+	if c.allowTurn(context.Background(), nil, u, "Shadowrun") {
 		t.Fatal("expected the turn to be refused at the limit")
+	}
+}
+
+// There are no exemptions, deliberately. Answering an event invite is a
+// message like any other: it is served while the allowance holds and refused
+// once it does not, with no inspection of what the turn was "really" for.
+//
+// The alternative was classifying turns after the fact, from whichever tools
+// the model chose to call -- a quota rule resting on a model's judgement. This
+// bot's event card is plain text with no inline buttons, so there is no
+// callback to key off and no cheap deterministic signal to use instead.
+func TestConfirmingAnEventIsNotExempt(t *testing.T) {
+	c := newUsageClient(t)
+	spend(c, "@alice", usage.DailyPromptLimit)
+
+	// A DM that is plainly an answer to an invite, from someone out of quota.
+	u := update(555, "alice", "vou sim", time.Now())
+	if c.allowTurn(context.Background(), nil, u, "") {
+		t.Fatal("a confirmation must be refused like anything else once the quota is gone")
+	}
+}
+
+func TestEveryServedTurnCostsTheSame(t *testing.T) {
+	c := newUsageClient(t)
+
+	c.recordTurn(update(555, "alice", "vou sim", time.Now()), "")
+	c.recordTurn(update(-100, "alice", "rola 1d20", time.Now()), "Shadowrun")
+	c.recordTurn(update(-100, "alice", "quem foi Vecna?", time.Now()), "Shadowrun")
+
+	if _, used := c.usage.Allowance("@alice"); used != 3 {
+		t.Fatalf("expected all three to count, got %d", used)
 	}
 }
 
@@ -98,8 +127,8 @@ func TestARefusalIsLoggedWithoutSpendingQuota(t *testing.T) {
 	spend(c, "@alice", usage.DailyPromptLimit)
 
 	u := update(-100, "alice", "e aí", time.Now())
-	c.allowTurn(context.Background(), nil, u, "Shadowrun", false)
-	c.allowTurn(context.Background(), nil, u, "Shadowrun", false)
+	c.allowTurn(context.Background(), nil, u, "Shadowrun")
+	c.allowTurn(context.Background(), nil, u, "Shadowrun")
 
 	_, used := c.usage.Allowance("@alice")
 	if used != usage.DailyPromptLimit {
@@ -110,22 +139,8 @@ func TestARefusalIsLoggedWithoutSpendingQuota(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	if _, _, blocked := rep.Totals(); blocked != 2 {
+	if _, blocked := rep.Totals(); blocked != 2 {
 		t.Fatalf("expected both refusals recorded, got %d", blocked)
-	}
-}
-
-// The core exemption. Classification as a confirmation can only happen after
-// the turn, from the tools it called -- so without this, someone who had spent
-// their allowance would be refused before the code could ever discover that
-// answering an invite was all they were doing.
-func TestAPendingInviteSuspendsTheQuota(t *testing.T) {
-	c := newUsageClient(t)
-	spend(c, "@alice", usage.DailyPromptLimit+10)
-
-	u := update(555, "alice", "vou sim", time.Now())
-	if !c.allowTurn(context.Background(), nil, u, "", true) {
-		t.Fatal("someone with a pending invite must always be able to answer it")
 	}
 }
 
@@ -135,98 +150,10 @@ func TestWithoutARecorderEverythingIsServed(t *testing.T) {
 	c := newTestClient(t) // no SetUsage
 
 	u := update(-100, "alice", "e aí", time.Now())
-	if !c.allowTurn(context.Background(), nil, u, "Shadowrun", false) {
+	if !c.allowTurn(context.Background(), nil, u, "Shadowrun") {
 		t.Fatal("expected every turn to be served with no recorder")
 	}
-	c.recordTurn(u, "Shadowrun", googlegenai.TurnResult{}) // must not panic
-}
-
-// A turn whose only tool call was recording an answer is a confirmation,
-// however the message was phrased -- "sim", "bora" and a reply to the card are
-// all the same act and none is recognisable from its text.
-func TestATurnThatOnlyConfirmedIsRecordedAsAConfirmation(t *testing.T) {
-	c := newUsageClient(t)
-
-	u := update(555, "alice", "vou sim", time.Now())
-	c.recordTurn(u, "", googlegenai.TurnResult{
-		Text: "Anotado!",
-		ToolCalls: []googlegenai.ToolCall{
-			{Name: event.EventManageToolName, Action: event.UpdateStatusAction},
-		},
-	})
-
-	if _, used := c.usage.Allowance("@alice"); used != 0 {
-		t.Fatalf("a confirmation must not spend quota, got %d used", used)
-	}
-}
-
-// Answering two invites in one turn is still nothing but confirming.
-func TestSeveralConfirmationsInOneTurnAreStillAConfirmation(t *testing.T) {
-	c := newUsageClient(t)
-
-	u := update(555, "alice", "vou nos dois", time.Now())
-	c.recordTurn(u, "", googlegenai.TurnResult{
-		ToolCalls: []googlegenai.ToolCall{
-			{Name: event.EventManageToolName, Action: event.UpdateStatusAction},
-			{Name: event.EventManageToolName, Action: event.UpdateStatusAction},
-		},
-	})
-
-	if _, used := c.usage.Allowance("@alice"); used != 0 {
-		t.Fatalf("expected no quota spent, got %d used", used)
-	}
-}
-
-// The exemption is for confirming and nothing else. A turn that confirmed AND
-// did real work is a prompt, or "sim, e marca outra pra sexta" would be free.
-func TestConfirmingPlusRealWorkIsAPrompt(t *testing.T) {
-	c := newUsageClient(t)
-
-	u := update(-100, "alice", "vou sim, e marca outra pra sexta", time.Now())
-	c.recordTurn(u, "Shadowrun", googlegenai.TurnResult{
-		ToolCalls: []googlegenai.ToolCall{
-			{Name: event.EventManageToolName, Action: event.UpdateStatusAction},
-			{Name: event.EventManageToolName, Action: "create"},
-		},
-	})
-
-	if _, used := c.usage.Allowance("@alice"); used != 1 {
-		t.Fatalf("expected the turn to spend quota, got %d used", used)
-	}
-}
-
-func TestAnOrdinaryTurnIsRecordedAsAPrompt(t *testing.T) {
-	c := newUsageClient(t)
-
-	u := update(-100, "alice", "rola 1d20", time.Now())
-	c.recordTurn(u, "Shadowrun", googlegenai.TurnResult{
-		Text:      "17",
-		ToolCalls: []googlegenai.ToolCall{{Name: "roll_dice"}},
-	})
-
-	if _, used := c.usage.Allowance("@alice"); used != 1 {
-		t.Fatalf("expected 1 prompt, got %d", used)
-	}
-}
-
-// A turn with no tool calls at all is plain conversation, and must not be
-// mistaken for a confirmation just because it called nothing that wasn't one.
-func TestATurnWithNoToolCallsIsAPrompt(t *testing.T) {
-	c := newUsageClient(t)
-
-	u := update(-100, "alice", "quem foi Vecna?", time.Now())
-	c.recordTurn(u, "Shadowrun", googlegenai.TurnResult{Text: "Vecna era..."})
-
-	if _, used := c.usage.Allowance("@alice"); used != 1 {
-		t.Fatalf("expected 1 prompt, got %d", used)
-	}
-}
-
-func TestOnlyCalledRequiresAtLeastOneCall(t *testing.T) {
-	empty := googlegenai.TurnResult{}
-	if empty.OnlyCalled(event.EventManageToolName, event.UpdateStatusAction) {
-		t.Error("a turn that called nothing has not confirmed anything")
-	}
+	c.recordTurn(u, "Shadowrun") // must not panic
 }
 
 // Usage is attributed to the chat it happened in, which is what makes the
@@ -234,8 +161,8 @@ func TestOnlyCalledRequiresAtLeastOneCall(t *testing.T) {
 func TestATurnIsAttributedToItsChat(t *testing.T) {
 	c := newUsageClient(t)
 
-	c.recordTurn(update(-100, "alice", "oi", time.Now()), "Shadowrun", googlegenai.TurnResult{})
-	c.recordTurn(update(-200, "bmaraujo", "oi", time.Now()), "Outro Grupo", googlegenai.TurnResult{})
+	c.recordTurn(update(-100, "alice", "oi", time.Now()), "Shadowrun")
+	c.recordTurn(update(-200, "bmaraujo", "oi", time.Now()), "Outro Grupo")
 
 	rep, err := c.usage.Build(time.Now().Add(-time.Hour), time.Now(), -100)
 	if err != nil {

@@ -13,7 +13,6 @@ import (
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 	"github.com/gtrindade/ultra-kiew/internal/config"
-	"github.com/gtrindade/ultra-kiew/internal/event"
 	"github.com/gtrindade/ultra-kiew/internal/googlegenai"
 	"github.com/gtrindade/ultra-kiew/internal/storage"
 	"github.com/gtrindade/ultra-kiew/internal/usage"
@@ -226,9 +225,6 @@ func (c *Client) handler(ctx context.Context, b *bot.Bot, update *models.Update)
 
 	isChatPrivate := update.Message.Chat.Type == models.ChatTypePrivate
 
-	// hasPendingInvite doubles as the quota exemption below, so it has to
-	// outlive the block that computes it.
-	var hasPendingInvite bool
 	var systemNote string
 	if isChatPrivate {
 		username := "@" + update.Message.From.Username
@@ -273,8 +269,6 @@ func (c *Client) handler(ctx context.Context, b *bot.Bot, update *models.Update)
 			}
 		}
 
-		hasPendingInvite = len(pendingEvents) > 0
-
 		if len(pendingEvents) == 1 {
 			p := pendingEvents[0]
 			systemNote = fmt.Sprintf("This user has exactly ONE pending event invite: %q on %s. If this message is an answer to that invite, work out whether it is yes, no or late and call event_manage with action='update_status' RIGHT NOW. Do not reply that you will note it down without calling the tool. The system already knows who is speaking and which event this is, so you do not pass a username or an event id.", p.Summary, p.Date)
@@ -304,7 +298,7 @@ func (c *Client) handler(ctx context.Context, b *bot.Bot, update *models.Update)
 	// means a restart costs recent context instead of all of it.
 	c.addToChatHistory(update)
 	chatTitle := update.Message.Chat.Title
-	if !c.allowTurn(ctx, b, update, chatTitle, hasPendingInvite) {
+	if !c.allowTurn(ctx, b, update, chatTitle) {
 		return
 	}
 
@@ -318,14 +312,13 @@ func (c *Client) handler(ctx context.Context, b *bot.Bot, update *models.Update)
 	})
 	c.trimChatHistory(chatID)
 
-	turn, err := c.ai.SendMessage(ctx, chatID, chatTitle, prompt)
+	response, err = c.ai.SendMessage(ctx, chatID, chatTitle, prompt)
 	if err != nil {
 		log.Printf("Failed to send message to AI: %v", err)
-		turn.Text = "Sorry, something went wrong."
+		response = "Sorry, something went wrong."
 	}
-	response = turn.Text
 
-	c.recordTurn(update, chatTitle, turn)
+	c.recordTurn(update, chatTitle)
 
 	var replyParams *models.ReplyParameters
 	if !isChatPrivate {
@@ -378,14 +371,14 @@ func usageUser(from *models.User) string {
 // in reverse: group chatter the bot was never addressed in costs nothing and
 // must not eat anyone's allowance.
 //
-// A pending event invite suspends the quota entirely. Classification of a turn
-// as a confirmation can only happen afterwards, from the tools it called, so
-// without this exemption someone who had spent their allowance would be unable
-// to answer an invite -- refused before the code could ever discover that
-// answering was all they were doing. The exemption is self-limiting: it exists
-// only while an invite is genuinely outstanding.
-func (c *Client) allowTurn(ctx context.Context, b *bot.Bot, update *models.Update, chatTitle string, hasPendingInvite bool) bool {
-	if c.usage == nil || hasPendingInvite {
+// Every served turn costs the same, with no exemptions. An earlier version let
+// event confirmations through free, which meant deciding after the fact --
+// from the tools the model chose to call -- whether a turn had "really" been a
+// confirmation. That put a quota rule at the mercy of a model's judgement, for
+// a bot whose event card is plain text with no inline buttons and therefore no
+// callback to key off. Running out means running out.
+func (c *Client) allowTurn(ctx context.Context, b *bot.Bot, update *models.Update, chatTitle string) bool {
+	if c.usage == nil {
 		return true
 	}
 
@@ -422,20 +415,9 @@ func (c *Client) allowTurn(ctx context.Context, b *bot.Bot, update *models.Updat
 }
 
 // recordTurn writes one line of the usage log for a turn that was served.
-//
-// A turn whose only tool calls were event confirmations is logged as a
-// confirmation and does not spend quota. Classifying from what the turn DID,
-// rather than from what the message looked like, is what makes that reliable:
-// "sim", "bora", "vou chegar atrasado" and a reply to the card are all the
-// same act, and none of them is recognisable as one from the text alone.
-func (c *Client) recordTurn(update *models.Update, chatTitle string, turn googlegenai.TurnResult) {
+func (c *Client) recordTurn(update *models.Update, chatTitle string) {
 	if c.usage == nil {
 		return
-	}
-
-	kind := usage.KindPrompt
-	if turn.OnlyCalled(event.EventManageToolName, event.UpdateStatusAction) {
-		kind = usage.KindConfirmation
 	}
 
 	c.usage.Record(usage.Entry{
@@ -444,7 +426,7 @@ func (c *Client) recordTurn(update *models.Update, chatTitle string, turn google
 		ChatID:    update.Message.Chat.ID,
 		ChatTitle: chatTitle,
 		Private:   update.Message.Chat.Type == models.ChatTypePrivate,
-		Kind:      kind,
+		Kind:      usage.KindPrompt,
 	})
 }
 

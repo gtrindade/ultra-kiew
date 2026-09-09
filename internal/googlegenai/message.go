@@ -183,44 +183,6 @@ func (c *Client) SendMessageWithParts(ctx context.Context, chatID int64, parts [
 	return result.Text(), nil
 }
 
-// ToolCall records one tool the model invoked during a turn, and the "action"
-// it asked for when the tool takes one.
-//
-// This is reported back to the caller because what a turn DID is sometimes the
-// only way to classify it after the fact. Usage accounting is the case in
-// point: a turn that only recorded someone's answer to an event invite is not
-// the same thing as a turn that asked the bot to do work, and nothing about
-// the incoming message reliably says which it was going to be.
-type ToolCall struct {
-	Name   string
-	Action string
-}
-
-// TurnResult is everything one conversational turn produced.
-type TurnResult struct {
-	// Text is the reply to send, already scrubbed. Empty means say nothing.
-	Text string
-	// ToolCalls lists every tool invoked, in order, across every tool round.
-	ToolCalls []ToolCall
-}
-
-// OnlyCalled reports whether the turn made at least one tool call and every
-// one of them matched name/action.
-//
-// "At least one" matters: a turn that called nothing has not confirmed
-// anything, and must not be classified as if it had.
-func (r TurnResult) OnlyCalled(name, action string) bool {
-	if len(r.ToolCalls) == 0 {
-		return false
-	}
-	for _, call := range r.ToolCalls {
-		if call.Name != name || call.Action != action {
-			return false
-		}
-	}
-	return true
-}
-
 // SendMessage runs one conversational turn for a chat, resolving any tool calls
 // the model makes along the way.
 //
@@ -230,7 +192,7 @@ func (r TurnResult) OnlyCalled(name, action string) bool {
 // the conversation was the single largest source of failures in testing: it
 // asked users to supply the ID by hand, claimed the ID was invalid, and
 // "registered" a group against an ID it had made up.
-func (c *Client) SendMessage(ctx context.Context, chatID int64, chatTitle string, text string) (TurnResult, error) {
+func (c *Client) SendMessage(ctx context.Context, chatID int64, chatTitle string, text string) (string, error) {
 	// Telegram user IDs are positive and group/supergroup IDs are negative, so
 	// the sign of the chat ID is what tells a DM from a group. This used to be
 	// re-derived inside each tool from a value the model supplied; it is
@@ -238,7 +200,7 @@ func (c *Client) SendMessage(ctx context.Context, chatID int64, chatTitle string
 	return c.sendTurn(ctx, chatID, chatTitle, text, chatID > 0)
 }
 
-func (c *Client) sendTurn(ctx context.Context, chatID int64, chatTitle, text string, isPrivate bool) (TurnResult, error) {
+func (c *Client) sendTurn(ctx context.Context, chatID int64, chatTitle, text string, isPrivate bool) (string, error) {
 	// A session poisoned by an earlier failed tool round answers every turn
 	// with nothing until it is rebuilt, so it is repaired before the turn
 	// rather than after it goes wrong again. This no-ops when there is no
@@ -247,17 +209,15 @@ func (c *Client) sendTurn(ctx context.Context, chatID int64, chatTitle, text str
 		log.Printf("chat %d: %v", chatID, err)
 	}
 
-	var turn TurnResult
-
 	chat, err := c.GetChat(ctx, chatID)
 	if err != nil {
-		return turn, fmt.Errorf("failed to create new chat: %w", err)
+		return "", fmt.Errorf("failed to create new chat: %w", err)
 	}
 
 	parts := []*genai.Part{genai.NewPartFromText(text)}
 	result, chat, err := c.sendWithRetry(ctx, chat, chatID, parts...)
 	if err != nil {
-		return turn, fmt.Errorf("failed to send message: %w", err)
+		return "", fmt.Errorf("failed to send message: %w", err)
 	}
 
 	// Bound the tool loop. Without this a model that keeps re-calling a failing
@@ -278,12 +238,6 @@ func (c *Client) sendTurn(ctx context.Context, chatID int64, chatTitle, text str
 		// history.
 		response := make([]*genai.Part, 0, len(functionCalls))
 		for _, call := range functionCalls {
-			// Recorded before dispatch: runToolCall overwrites the injected
-			// context keys in this same map, and a tool that fails still
-			// happened as far as "what did this turn do" is concerned.
-			action, _ := call.Args["action"].(string)
-			turn.ToolCalls = append(turn.ToolCalls, ToolCall{Name: call.Name, Action: action})
-
 			response = append(response, c.runToolCall(call, chatID, chatTitle, isPrivate))
 		}
 
@@ -295,7 +249,7 @@ func (c *Client) sendTurn(ctx context.Context, chatID int64, chatTitle, text str
 		lastToolResponses = response
 		result, chat, err = c.sendWithRetry(ctx, chat, chatID, response...)
 		if err != nil {
-			return turn, fmt.Errorf("failed to send function response: %w", err)
+			return "", fmt.Errorf("failed to send function response: %w", err)
 		}
 	}
 
@@ -317,7 +271,7 @@ func (c *Client) sendTurn(ctx context.Context, chatID int64, chatTitle, text str
 	responseText := scrubResponse(result.Text())
 
 	if strings.Contains(responseText, "__SILENT__") {
-		return turn, nil
+		return "", nil
 	}
 
 	if responseText == "" {
@@ -326,16 +280,13 @@ func (c *Client) sendTurn(ctx context.Context, chatID int64, chatTitle, text str
 		// direct question with silence.
 		if reason := refusalReason(result); reason != "" {
 			log.Printf("chat %d: model declined to answer (%s)", chatID, reason)
-			turn.Text = fmt.Sprintf("Não consegui responder isso: %s.", reason)
-			return turn, nil
+			return fmt.Sprintf("Não consegui responder isso: %s.", reason), nil
 		}
 		log.Printf("chat %d: model returned nothing usable after %d attempts", chatID, maxSendAttempts)
-		turn.Text = "Não consegui gerar uma resposta agora. Pode tentar de novo?"
-		return turn, nil
+		return "Não consegui gerar uma resposta agora. Pode tentar de novo?", nil
 	}
 
-	turn.Text = responseText
-	return turn, nil
+	return responseText, nil
 }
 
 // sendWithRetry performs one exchange with the model, retrying when it comes

@@ -97,25 +97,6 @@ func TestTheQuotaWindowIsRolling(t *testing.T) {
 	}
 }
 
-// Confirming attendance is the bot's core job. Rationing it would be
-// self-defeating, so it is logged but never counted.
-func TestConfirmationsDoNotSpendQuota(t *testing.T) {
-	r := setupRecorder(t)
-
-	for range 60 {
-		record(r, "@alice", KindConfirmation, 5, testChatID)
-	}
-	record(r, "@alice", KindPrompt, 5, testChatID)
-
-	remaining, used := r.Allowance("@alice")
-	if used != 1 {
-		t.Fatalf("only the prompt should count, got %d used", used)
-	}
-	if remaining != DailyPromptLimit-1 {
-		t.Fatalf("expected %d remaining, got %d", DailyPromptLimit-1, remaining)
-	}
-}
-
 // A blocked message must not count against the quota that blocked it, or the
 // refusal would deepen itself every time someone retried.
 func TestBlockedMessagesDoNotSpendQuota(t *testing.T) {
@@ -256,7 +237,7 @@ func TestAGroupReportCoversOnlyThatGroup(t *testing.T) {
 	if len(rep.Rows) != 1 || rep.Rows[0].User != "@alice" {
 		t.Fatalf("expected only this chat's users, got %+v", rep.Rows)
 	}
-	if prompts, _, _ := rep.Totals(); prompts != 2 {
+	if prompts, _ := rep.Totals(); prompts != 2 {
 		t.Fatalf("expected 2 prompts, got %d", prompts)
 	}
 }
@@ -328,7 +309,6 @@ func TestRenderShowsEachKindAndTheTotals(t *testing.T) {
 	for range 3 {
 		record(r, "@alice", KindPrompt, 5, testChatID)
 	}
-	record(r, "@alice", KindConfirmation, 5, testChatID)
 	record(r, "@bmaraujo", KindBlocked, 5, testChatID)
 
 	rep, err := r.Build(time.Now().Add(-time.Hour), time.Now(), testChatID)
@@ -337,7 +317,7 @@ func TestRenderShowsEachKindAndTheTotals(t *testing.T) {
 	}
 	got := rep.Render()
 
-	for _, want := range []string{"@alice", "3 prompts", "1 confirmação", "@bmaraujo", "1 bloqueada"} {
+	for _, want := range []string{"@alice", "3 mensagens", "@bmaraujo", "1 bloqueada"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("expected %q in:\n%s", want, got)
 		}
@@ -421,7 +401,7 @@ func TestManageDefaultsToTheLast24Hours(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Manage: %v", err)
 	}
-	if !strings.Contains(got, "1 prompt") {
+	if !strings.Contains(got, "1 mensagem") {
 		t.Errorf("expected only the last 24h, got:\n%s", got)
 	}
 }
@@ -435,7 +415,7 @@ func TestManageHonoursAnHoursArgument(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Manage: %v", err)
 	}
-	if !strings.Contains(got, "2 prompts") {
+	if !strings.Contains(got, "2 mensagens") {
 		t.Errorf("expected both messages inside 48h, got:\n%s", got)
 	}
 }
@@ -450,7 +430,7 @@ func TestManageAcceptsHoursAsAString(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Manage: %v", err)
 	}
-	if !strings.Contains(got, "1 prompt") {
+	if !strings.Contains(got, "1 mensagem") {
 		t.Errorf("expected the string to be read as a number, got:\n%s", got)
 	}
 }
@@ -467,7 +447,7 @@ func TestManageAcceptsAnExplicitWindow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Manage: %v", err)
 	}
-	if !strings.Contains(got, "1 prompt") {
+	if !strings.Contains(got, "1 mensagem") {
 		t.Errorf("expected the explicit window to be honoured, got:\n%s", got)
 	}
 }
@@ -482,7 +462,7 @@ func TestManageAcceptsABareDate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Manage: %v", err)
 	}
-	if !strings.Contains(got, "1 prompt") {
+	if !strings.Contains(got, "1 mensagem") {
 		t.Errorf("expected a bare date to work, got:\n%s", got)
 	}
 }
@@ -553,16 +533,20 @@ func TestManageNeedsTheCallerChatContext(t *testing.T) {
 	}
 }
 
-func TestQuotaMessageNamesTheNumberAndExemptsConfirmations(t *testing.T) {
+func TestQuotaMessageExplainsTheLimitAndHowItRecovers(t *testing.T) {
 	got := QuotaMessage(50)
 
 	if !strings.Contains(got, "50") {
 		t.Errorf("expected the count, got %q", got)
 	}
-	// Someone who hits the wall needs to know their invites still work, or
-	// they will assume the bot is broken.
-	if !strings.Contains(strings.ToLower(got), "confirmar") {
-		t.Errorf("expected the confirmation exemption to be stated, got %q", got)
+	// A rolling window recovers gradually, so "try later" is actionable in a
+	// way that "you are out" is not.
+	if !strings.Contains(got, "24h") && !strings.Contains(got, "24 horas") {
+		t.Errorf("expected the window to be stated, got %q", got)
+	}
+	// It must not promise an exemption that no longer exists.
+	if strings.Contains(strings.ToLower(got), "confirmar") {
+		t.Errorf("the confirmation exemption is gone and must not be advertised: %q", got)
 	}
 }
 
