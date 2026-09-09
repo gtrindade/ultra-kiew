@@ -114,7 +114,7 @@ func TestEveryServedTurnCostsTheSame(t *testing.T) {
 	c.recordTurn(update(-100, "alice", "rola 1d20", time.Now()), "Shadowrun")
 	c.recordTurn(update(-100, "alice", "quem foi Vecna?", time.Now()), "Shadowrun")
 
-	if _, used := c.usage.Allowance("@alice"); used != 3 {
+	if used := c.usage.Standing("@alice").Used; used != 3 {
 		t.Fatalf("expected all three to count, got %d", used)
 	}
 }
@@ -130,7 +130,7 @@ func TestARefusalIsLoggedWithoutSpendingQuota(t *testing.T) {
 	c.allowTurn(context.Background(), nil, u, "Shadowrun")
 	c.allowTurn(context.Background(), nil, u, "Shadowrun")
 
-	_, used := c.usage.Allowance("@alice")
+	used := c.usage.Standing("@alice").Used
 	if used != usage.DailyPromptLimit {
 		t.Fatalf("refusals should not spend quota, got %d used", used)
 	}

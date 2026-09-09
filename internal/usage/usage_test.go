@@ -53,12 +53,8 @@ func TestRecordAndCountRoundTrip(t *testing.T) {
 		record(r, "@alice", KindPrompt, 10, testChatID)
 	}
 
-	got, err := r.PromptsSince("@alice", time.Now().Add(-time.Hour))
-	if err != nil {
-		t.Fatalf("PromptsSince: %v", err)
-	}
-	if got != 3 {
-		t.Fatalf("expected 3 prompts, got %d", got)
+	if got := r.Standing("@alice").Used; got != 3 {
+		t.Fatalf("expected 3 messages counted, got %d", got)
 	}
 }
 
@@ -88,11 +84,7 @@ func TestTheQuotaWindowIsRolling(t *testing.T) {
 	record(r, "@alice", KindPrompt, 23*60, testChatID) // inside
 	record(r, "@alice", KindPrompt, 25*60, testChatID) // outside
 
-	got, err := r.PromptsSince("@alice", time.Now().Add(-QuotaWindow))
-	if err != nil {
-		t.Fatalf("PromptsSince: %v", err)
-	}
-	if got != 1 {
+	if got := r.Standing("@alice").Used; got != 1 {
 		t.Fatalf("expected only the message inside the window, got %d", got)
 	}
 }
@@ -106,7 +98,7 @@ func TestBlockedMessagesDoNotSpendQuota(t *testing.T) {
 		record(r, "@alice", KindBlocked, 5, testChatID)
 	}
 
-	_, used := r.Allowance("@alice")
+	used := r.Standing("@alice").Used
 	if used != 0 {
 		t.Fatalf("blocked messages should not count, got %d used", used)
 	}
@@ -118,12 +110,13 @@ func TestAllowanceRunsOutAtTheLimit(t *testing.T) {
 	for range DailyPromptLimit - 1 {
 		record(r, "@alice", KindPrompt, 5, testChatID)
 	}
-	if remaining, _ := r.Allowance("@alice"); remaining != 1 {
+	if remaining := r.Standing("@alice").Remaining; remaining != 1 {
 		t.Fatalf("expected 1 left, got %d", remaining)
 	}
 
 	record(r, "@alice", KindPrompt, 5, testChatID)
-	remaining, used := r.Allowance("@alice")
+	st := r.Standing("@alice")
+	remaining, used := st.Remaining, st.Used
 	if remaining != 0 {
 		t.Fatalf("expected the allowance spent, got %d", remaining)
 	}
@@ -140,7 +133,7 @@ func TestAllowanceNeverGoesNegative(t *testing.T) {
 	for range DailyPromptLimit + 20 {
 		record(r, "@alice", KindPrompt, 5, testChatID)
 	}
-	if remaining, _ := r.Allowance("@alice"); remaining != 0 {
+	if remaining := r.Standing("@alice").Remaining; remaining != 0 {
 		t.Fatalf("expected 0, got %d", remaining)
 	}
 }
@@ -154,7 +147,7 @@ func TestQuotaIsCaseInsensitive(t *testing.T) {
 	record(r, "@alice", KindPrompt, 5, testChatID)
 	record(r, "@ALICE", KindPrompt, 5, testChatID)
 
-	if _, used := r.Allowance("@aLiCe"); used != 3 {
+	if used := r.Standing("@aLiCe").Used; used != 3 {
 		t.Fatalf("expected all three to be the same person, got %d", used)
 	}
 }
@@ -166,7 +159,7 @@ func TestOnePersonsUseDoesNotAffectAnother(t *testing.T) {
 		record(r, "@alice", KindPrompt, 5, testChatID)
 	}
 
-	if remaining, _ := r.Allowance("@bmaraujo"); remaining != DailyPromptLimit {
+	if remaining := r.Standing("@bmaraujo").Remaining; remaining != DailyPromptLimit {
 		t.Fatalf("expected an untouched allowance, got %d", remaining)
 	}
 }
@@ -182,7 +175,7 @@ func TestAnUnreadableLogFailsOpen(t *testing.T) {
 		t.Fatalf("could not corrupt the log: %v", err)
 	}
 
-	remaining, _ := r.Allowance("@alice")
+	remaining := r.Standing("@alice").Remaining
 	if remaining != DailyPromptLimit {
 		t.Fatalf("expected the full allowance when the log cannot be read, got %d", remaining)
 	}
@@ -206,7 +199,7 @@ func TestATruncatedFinalLineDoesNotDiscardTheRest(t *testing.T) {
 	}
 	file.Close()
 
-	if _, used := r.Allowance("@alice"); used != 3 {
+	if used := r.Standing("@alice").Used; used != 3 {
 		t.Fatalf("expected the three intact records, got %d", used)
 	}
 }
@@ -214,7 +207,8 @@ func TestATruncatedFinalLineDoesNotDiscardTheRest(t *testing.T) {
 func TestNoLogFileYetIsNotAnError(t *testing.T) {
 	r := setupRecorder(t)
 
-	remaining, used := r.Allowance("@alice")
+	st := r.Standing("@alice")
+	remaining, used := st.Remaining, st.Used
 	if remaining != DailyPromptLimit || used != 0 {
 		t.Fatalf("a first run should have a full allowance, got %d/%d", remaining, used)
 	}
@@ -387,7 +381,7 @@ func TestRemainingIsNeverShownOnAGroupScopedReport(t *testing.T) {
 	}
 
 	// The allowance itself still counts every chat.
-	if remaining, _ := r.Allowance("@alice"); remaining != 0 {
+	if remaining := r.Standing("@alice").Remaining; remaining != 0 {
 		t.Errorf("expected the quota to span chats, got %d remaining", remaining)
 	}
 }
@@ -534,7 +528,7 @@ func TestManageNeedsTheCallerChatContext(t *testing.T) {
 }
 
 func TestQuotaMessageExplainsTheLimitAndHowItRecovers(t *testing.T) {
-	got := QuotaMessage(50)
+	got := QuotaMessage(Standing{Used: 50, Limit: 50})
 
 	if !strings.Contains(got, "50") {
 		t.Errorf("expected the count, got %q", got)

@@ -48,13 +48,24 @@ type GoogleConfig struct {
 }
 
 type Config struct {
-	TelegramBotToken string         `yaml:"telegram_bot_token"`
-	GeminiAPIKey     string         `yaml:"gemini_api_key"`
-	BotName          string         `yaml:"bot_name"`
-	DNDTools         *DBConfig      `yaml:"dnd_tools"`
-	SRD              *DBConfig      `yaml:"srd"`
-	FoundryVTT       *FoundryConfig `yaml:"foundry_vtt"`
-	Google           *GoogleConfig  `yaml:"google"`
+	TelegramBotToken string `yaml:"telegram_bot_token"`
+
+	// AdminUsers are the @handles allowed to raise someone's message quota.
+	// Everything else in this bot is open to whoever is in the chat; this is
+	// the one power that is not.
+	//
+	// Left empty it falls back to usage.DefaultAdmins rather than to nobody,
+	// so a deployment that forgets this field still has a working escape
+	// hatch instead of a limit no one can lift. The active list is logged at
+	// startup either way.
+	AdminUsers []string `yaml:"admin_users"`
+
+	GeminiAPIKey string         `yaml:"gemini_api_key"`
+	BotName      string         `yaml:"bot_name"`
+	DNDTools     *DBConfig      `yaml:"dnd_tools"`
+	SRD          *DBConfig      `yaml:"srd"`
+	FoundryVTT   *FoundryConfig `yaml:"foundry_vtt"`
+	Google       *GoogleConfig  `yaml:"google"`
 }
 
 const (

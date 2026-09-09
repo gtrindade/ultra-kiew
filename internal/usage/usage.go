@@ -26,6 +26,19 @@ const (
 	// relatório de uso".
 	UsageReportToolName = "usage_report"
 
+	// GrantQuotaToolName is the tool an admin calls to hand someone more
+	// allowance.
+	GrantQuotaToolName = "grant_quota"
+
+	// usersFileName maps @handle to Telegram chat ID. Used here only to
+	// identify the caller and to check a grant is aimed at somebody real.
+	usersFileName = "users.json"
+
+	// maxGrant caps a single grant. A quota exists to bound runaway use, and
+	// a mistyped "500000" that silently removed the bound would defeat it
+	// more quietly than having no limit at all.
+	maxGrant = 500
+
 	// LogFileName is the append-only log, under the storage database path.
 	// Exported so an operator knows what to back up or rotate, and so tests
 	// can start from a clean one.
@@ -51,12 +64,28 @@ const (
 	maxReportWindow = 365 * 24 * time.Hour
 )
 
+// DefaultAdmins is who may grant quota when config.yaml names nobody.
+//
+// A hardcoded owner is not elegant, and the alternative was worse: with
+// config-only admins, a server whose config.yaml was never updated has a quota
+// that nobody on earth can lift, and it fails silently -- the tool just refuses
+// and the operator is left guessing. This is a single-owner bot, so the owner
+// is the sane default. config.yaml's admin_users overrides it entirely.
+var DefaultAdmins = []string{"@guilhermetmg"}
+
 // Kind is what one logged turn was.
 type Kind string
 
 const (
 	// KindPrompt is a served turn, and the only kind that spends quota.
 	KindPrompt Kind = "prompt"
+
+	// KindGrant is extra allowance handed out by an admin, carrying its size
+	// in Amount. It is logged rather than stored as a mutable per-user limit
+	// so that it rolls off on exactly the same 24h window as the usage it
+	// offsets -- a grant is "here is more for today", not a permanent raise,
+	// and it needs no second state file to expire.
+	KindGrant Kind = "grant"
 
 	// KindBlocked is a turn that was refused because the quota was already
 	// spent. Logged so "is the limit biting anyone?" is answerable, and never
@@ -76,16 +105,35 @@ type Entry struct {
 	ChatTitle string `json:"chat,omitempty"`
 	Private   bool   `json:"dm,omitempty"`
 	Kind      Kind   `json:"kind"`
+
+	// Amount is the size of a KindGrant, and By is the admin who made it.
+	// Unused by every other kind.
+	Amount int    `json:"amt,omitempty"`
+	By     string `json:"by,omitempty"`
 }
 
 // Recorder owns the usage log.
 type Recorder struct {
 	storage *storage.Client
 	bot     *bot.Bot
+	admins  []string
 }
 
 func NewRecorder(storageClient *storage.Client) *Recorder {
 	return &Recorder{storage: storageClient}
+}
+
+// SetAdmins sets who may grant quota.
+//
+// Empty means nobody, deliberately: an unconfigured deployment must not hand
+// the power to raise limits to whoever asks first.
+func (r *Recorder) SetAdmins(handles []string) {
+	r.admins = append([]string(nil), handles...)
+}
+
+// Admins returns who may currently grant quota, for logging at startup.
+func (r *Recorder) Admins() []string {
+	return append([]string(nil), r.admins...)
 }
 
 // SetBot wires in the Telegram bot so a report can be posted to the chat
@@ -138,45 +186,61 @@ func (r *Recorder) scan(fn func(Entry)) error {
 	return err
 }
 
-// PromptsSince counts the prompts one user has spent since a moment.
+// Standing is where one person sits against their quota right now.
+type Standing struct {
+	// Used is messages spent inside the window.
+	Used int
+	// Granted is extra allowance handed out inside the window.
+	Granted int
+	// Limit is what they are actually allowed: the base plus any grants.
+	Limit int
+	// Remaining never goes below zero -- a negative would read as a debt.
+	Remaining int
+}
+
+// Standing reports where a user sits against their quota.
 //
 // Matching is case-insensitive because Telegram handles are, and a user
 // recorded as @Alice must not get a second allowance as @alice.
-func (r *Recorder) PromptsSince(user string, since time.Time) (int, error) {
-	cutoff := since.Unix()
-	count := 0
+//
+// A read failure returns a full, untouched allowance rather than none. The
+// quota exists to stop runaway use, not to be a second way for a broken disk
+// to take the bot down, so an unreadable log fails open and says so.
+func (r *Recorder) Standing(user string) Standing {
+	cutoff := time.Now().Add(-QuotaWindow).Unix()
+
+	var used, granted int
 	err := r.scan(func(e Entry) {
-		if e.Kind == KindPrompt && e.Timestamp >= cutoff && strings.EqualFold(e.User, user) {
-			count++
+		if e.Timestamp < cutoff || !strings.EqualFold(e.User, user) {
+			return
+		}
+		switch e.Kind {
+		case KindPrompt:
+			used++
+		case KindGrant:
+			granted += e.Amount
 		}
 	})
-	return count, err
-}
-
-// Allowance reports how much of the quota a user has left right now.
-//
-// A read failure returns the full allowance rather than none. The quota exists
-// to stop runaway use, not to be a second way for a broken disk to take the
-// bot down, so an unreadable log fails open and says so in the server log.
-func (r *Recorder) Allowance(user string) (remaining int, used int) {
-	used, err := r.PromptsSince(user, time.Now().Add(-QuotaWindow))
 	if err != nil {
 		log.Printf("usage: could not read the log to check %s's quota, allowing the message: %v", user, err)
-		return DailyPromptLimit, 0
+		return Standing{Limit: DailyPromptLimit, Remaining: DailyPromptLimit}
 	}
-	remaining = DailyPromptLimit - used
+
+	limit := DailyPromptLimit + granted
+	remaining := limit - used
 	if remaining < 0 {
 		remaining = 0
 	}
-	return remaining, used
+	return Standing{Used: used, Granted: granted, Limit: limit, Remaining: remaining}
 }
 
 // QuotaMessage is what a user is told when they have nothing left.
-func QuotaMessage(used int) string {
+func QuotaMessage(s Standing) string {
 	return fmt.Sprintf(
-		"Você já usou %d mensagens comigo nas últimas 24 horas, que é o limite. "+
-			"A cota vai liberando aos poucos conforme as mensagens antigas completam 24h -- tenta de novo mais tarde.",
-		used)
+		"Você já usou %d de %d mensagens nas últimas 24 horas, que é o seu limite. "+
+			"A cota vai liberando aos poucos conforme as mensagens antigas completam 24h -- tenta de novo mais tarde, "+
+			"ou fala com o @guilhermetmg se precisar de mais agora.",
+		s.Used, s.Limit)
 }
 
 // userTotals is one row of a report.
@@ -184,6 +248,7 @@ type userTotals struct {
 	User    string
 	Prompts int
 	Blocked int
+	Granted int
 }
 
 // Report is the aggregate answer for one window and scope.
@@ -240,6 +305,8 @@ func (r *Recorder) Build(since, until time.Time, chatID int64) (Report, error) {
 			row.Prompts++
 		case KindBlocked:
 			row.Blocked++
+		case KindGrant:
+			row.Granted += e.Amount
 		}
 	})
 	if err != nil {
@@ -288,6 +355,9 @@ func (rep Report) Render() string {
 		fmt.Fprintf(&sb, "%s — %s", row.User, plural(row.Prompts, "mensagem", "mensagens"))
 		if row.Blocked > 0 {
 			fmt.Fprintf(&sb, ", %s no limite", plural(row.Blocked, "bloqueada", "bloqueadas"))
+		}
+		if row.Granted > 0 {
+			fmt.Fprintf(&sb, ", +%d de cota extra", row.Granted)
 		}
 		if remaining := DailyPromptLimit - row.Prompts; remaining <= 10 && rep.showsRemaining() {
 			fmt.Fprintf(&sb, " (restam %d)", max(remaining, 0))
@@ -503,6 +573,152 @@ func GetToolConfig() *genai.Tool {
 							Description: "End of the period, same format as 'since'. Defaults to now.",
 						},
 					},
+				},
+			},
+		},
+	}
+}
+
+// callerHandle identifies who is calling, from the chat the message arrived
+// in.
+//
+// This works only in a private chat, where Telegram's chat ID is the user's
+// own ID, so users.json resolves it to a handle. That is the same trick
+// event.updateStatus uses, and it is deliberate: the caller's identity comes
+// from Telegram, never from an argument the model filled in. An admin check
+// the model could satisfy by claiming to be someone would not be an admin
+// check at all.
+func (r *Recorder) callerHandle(callerChatID int64) string {
+	knownUsers := make(map[string]int64)
+	r.storage.LoadOrLog(usersFileName, &knownUsers)
+	for handle, id := range knownUsers {
+		if id == callerChatID {
+			return handle
+		}
+	}
+	return ""
+}
+
+func (r *Recorder) isAdmin(handle string) bool {
+	for _, admin := range r.admins {
+		if strings.EqualFold(admin, handle) {
+			return true
+		}
+	}
+	return false
+}
+
+// Grant hands someone extra allowance for the rest of the quota window.
+//
+// Private chat only, and only for an admin. Both restrictions are enforced
+// here rather than described in the prompt, because a rule the model can be
+// talked out of is not a rule -- and this one governs who gets to remove a
+// limit.
+func (r *Recorder) Grant(args map[string]any) (string, error) {
+	callerChatID, ok := args[googlegenai.ArgCallerChatID].(int64)
+	if !ok {
+		return "", fmt.Errorf("internal error: caller chat context is missing")
+	}
+	isPrivate, _ := args[googlegenai.ArgIsPrivate].(bool)
+
+	if !isPrivate {
+		return "", fmt.Errorf("quota can only be granted in a private DM with the bot, and this is a group chat. Tell the user to do it in their DM with me")
+	}
+
+	caller := r.callerHandle(callerChatID)
+	if caller == "" || !r.isAdmin(caller) {
+		// One message for "not an admin" and for "not recognised at all". The
+		// difference is of no use to whoever is asking, and spelling it out
+		// would tell them how close they got.
+		return "", fmt.Errorf("only an administrator can change someone's quota, and this user is not one. Say so plainly and do not offer to do it another way")
+	}
+
+	target, _ := args["user"].(string)
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return "", fmt.Errorf("invalid argument: 'user' is required. Ask which person the extra quota is for, as an @username")
+	}
+	if !strings.HasPrefix(target, "@") {
+		target = "@" + target
+	}
+
+	amount, ok := intArg(args, "amount")
+	if !ok {
+		return "", fmt.Errorf("invalid argument: 'amount' is required and must be a whole number of extra messages")
+	}
+	if amount <= 0 {
+		return "", fmt.Errorf("'amount' must be greater than zero. To take quota away, there is no tool: it expires on its own within %s", QuotaWindow)
+	}
+	if amount > maxGrant {
+		return "", fmt.Errorf("%d is more than the %d maximum for one grant. Confirm the number with the user before trying again", amount, maxGrant)
+	}
+
+	// A grant aimed at a handle nobody owns is a silent no-op that looks like
+	// success, which is the worst outcome available here: the admin believes
+	// they helped and the person keeps hitting the wall.
+	knownUsers := make(map[string]int64)
+	r.storage.LoadOrLog(usersFileName, &knownUsers)
+	resolved := ""
+	for handle := range knownUsers {
+		if strings.EqualFold(handle, target) {
+			resolved = handle
+			break
+		}
+	}
+	if resolved == "" {
+		return "", fmt.Errorf("this bot has never seen %s, so granting them quota would do nothing. Check the @username -- they have to have talked to me at least once", target)
+	}
+
+	r.Record(Entry{
+		User:   resolved,
+		ChatID: callerChatID,
+		Kind:   KindGrant,
+		Amount: amount,
+		By:     caller,
+	})
+
+	after := r.Standing(resolved)
+	log.Printf("usage: %s granted %s +%d messages (now %d/%d used)", caller, resolved, amount, after.Used, after.Limit)
+
+	return fmt.Sprintf(
+		"Granted %s an extra %d messages. Their limit is now %d for the next 24 hours (%d already used, %d left), after which it returns to %d. Tell the user this plainly.",
+		resolved, amount, after.Limit, after.Used, after.Remaining, DailyPromptLimit), nil
+}
+
+// intArg reads a whole number, tolerating the float64 a JSON number decodes to
+// and the string a model sometimes sends instead.
+func intArg(args map[string]any, key string) (int, bool) {
+	value, ok := numberArg(args, key)
+	if !ok || value != float64(int(value)) {
+		return 0, false
+	}
+	return int(value), true
+}
+
+func GetGrantToolConfig() *genai.Tool {
+	return &genai.Tool{
+		FunctionDeclarations: []*genai.FunctionDeclaration{
+			{
+				Name: GrantQuotaToolName,
+				Description: "Gives one person extra messages on top of the standard daily limit, for the next 24 hours. " +
+					"Only an administrator can do this, and only in a private DM -- the code checks both and will refuse, so never promise it before calling. " +
+					"If it refuses, relay that plainly and do not look for another way to do the same thing. " +
+					"Use it when an administrator says something like 'da mais 50 pro @fulano' or 'aumenta a cota do @fulano'.",
+				Parameters: &genai.Schema{
+					Type: "object",
+					Properties: map[string]*genai.Schema{
+						"user": {
+							Type:        "string",
+							Description: "The @username to give extra messages to.",
+							Example:     "@bmaraujo",
+						},
+						"amount": {
+							Type:        "number",
+							Description: "How many extra messages to add, a whole number greater than zero.",
+							Example:     50,
+						},
+					},
+					Required: []string{"user", "amount"},
 				},
 			},
 		},

@@ -54,6 +54,10 @@ func main() {
 			Function: usageRecorder.Manage,
 			Tool:     usage.GetToolConfig(),
 		},
+		usage.GrantQuotaToolName: {
+			Function: usageRecorder.Grant,
+			Tool:     usage.GetGrantToolConfig(),
+		},
 	}
 
 	aiClient, err := googlegenai.NewClient(ctx, toolConfigs, storageClient, dbClient, config)
@@ -73,6 +77,7 @@ func main() {
 	// through the model, so the recorder needs the bot too.
 	usageRecorder.SetBot(botClient.Bot())
 	botClient.SetUsage(usageRecorder)
+	setUpAdmins(config, usageRecorder)
 	// Roster changes go through the event manager rather than writing
 	// events.json directly, so they stay behind the same mutex as everything
 	// else that touches it.
@@ -83,6 +88,24 @@ func main() {
 	go eventManager.StartEventMonitor(ctx, 1*time.Minute)
 
 	botClient.Start(ctx)
+}
+
+// setUpAdmins decides who may raise someone's message quota, and says so out
+// loud at startup.
+//
+// Logged every run because this is the only privileged operation in the bot
+// and it is invisible otherwise: a config typo would silently move the power
+// to nobody, and the only symptom would be the tool refusing an admin who is
+// certain they are one.
+func setUpAdmins(cfg *config.Config, recorder *usage.Recorder) {
+	admins := cfg.AdminUsers
+	source := "config.yaml"
+	if len(admins) == 0 {
+		admins = usage.DefaultAdmins
+		source = "built-in default (set admin_users in config.yaml to change)"
+	}
+	recorder.SetAdmins(admins)
+	log.Printf("Quota admins: %v -- from %s", admins, source)
 }
 
 // setUpMeet wires Google Meet integration into the event manager, or logs

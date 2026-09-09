@@ -383,13 +383,13 @@ func (c *Client) allowTurn(ctx context.Context, b *bot.Bot, update *models.Updat
 	}
 
 	user := usageUser(update.Message.From)
-	remaining, used := c.usage.Allowance(user)
-	if remaining > 0 {
+	standing := c.usage.Standing(user)
+	if standing.Remaining > 0 {
 		return true
 	}
 
-	log.Printf("chat %d: %s is over the %d-message limit (%d used), refusing the turn",
-		update.Message.Chat.ID, user, usage.DailyPromptLimit, used)
+	log.Printf("chat %d: %s is over their limit (%d used of %d, including %d granted), refusing the turn",
+		update.Message.Chat.ID, user, standing.Used, standing.Limit, standing.Granted)
 
 	c.usage.Record(usage.Entry{
 		User:      user,
@@ -406,7 +406,7 @@ func (c *Client) allowTurn(ctx context.Context, b *bot.Bot, update *models.Updat
 		if _, err := b.SendMessage(ctx, &bot.SendMessageParams{
 			ChatID:          update.Message.Chat.ID,
 			ReplyParameters: &models.ReplyParameters{MessageID: update.Message.ID},
-			Text:            usage.QuotaMessage(used),
+			Text:            usage.QuotaMessage(standing),
 		}); err != nil {
 			log.Printf("chat %d: could not tell %s about the limit: %v", update.Message.Chat.ID, user, err)
 		}
