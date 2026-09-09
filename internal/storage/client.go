@@ -1,6 +1,8 @@
 package storage
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -127,6 +129,82 @@ func (c *Client) LoadOrLog(name string, data any) {
 	if err := c.LoadFromDB(name, data); err != nil {
 		log.Printf("storage: could not read %s, continuing without it: %v", name, err)
 	}
+}
+
+// AppendJSONL appends one record to a newline-delimited JSON file under the
+// database path, creating it if it does not exist.
+//
+// This is a different storage shape from everything else here, on purpose. The
+// rest of the bot's state is small, mutable documents, so whole-file
+// load-mutate-save is the right fit. A usage log is neither: it only ever
+// grows, and rewriting the entire file to add one line would be both O(n) per
+// message and a read-modify-write race of exactly the kind LoadForUpdate
+// exists to catch. An append is O(1) and cannot lose earlier records.
+//
+// One record really is one line: encoding/json escapes newlines inside strings,
+// so a marshalled record never contains a raw one.
+func (c *Client) AppendJSONL(name string, record any) error {
+	encoded, err := json.Marshal(record)
+	if err != nil {
+		return fmt.Errorf("failed to encode a %s record: %w", name, err)
+	}
+
+	c.Lock()
+	defer c.Unlock()
+
+	filePath := filepath.Join(BasePath, DBPath, name)
+	if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
+		return fmt.Errorf("failed to create directories for %s: %w", filePath, err)
+	}
+
+	file, err := os.OpenFile(filePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to open %s for appending: %w", filePath, err)
+	}
+	defer file.Close()
+
+	if _, err := file.Write(append(encoded, '\n')); err != nil {
+		return fmt.Errorf("failed to append to %s: %w", filePath, err)
+	}
+	return nil
+}
+
+// ScanJSONL calls fn once per non-empty line of a newline-delimited JSON file.
+// A missing file scans as empty, same as Load.
+//
+// Lines are handed over raw rather than decoded here so the caller decides how
+// forgiving to be. That matters for an append-only log: a process killed
+// mid-append leaves a truncated final line, and refusing to read the whole file
+// because of it would be the wrong trade.
+func (c *Client) ScanJSONL(name string, fn func(line []byte) error) error {
+	c.RLock()
+	defer c.RUnlock()
+
+	filePath := filepath.Join(BasePath, DBPath, name)
+	file, err := os.Open(filePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to open %s: %w", filePath, err)
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	// The default 64KB line cap is far more than a usage record needs, but a
+	// single over-long line would otherwise abort the scan for every record
+	// after it.
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		if err := fn(line); err != nil {
+			return err
+		}
+	}
+	return scanner.Err()
 }
 
 // SaveToDB saves data to a file in the predefined database path and does not

@@ -15,6 +15,7 @@ import (
 	"github.com/gtrindade/ultra-kiew/internal/mysql"
 	"github.com/gtrindade/ultra-kiew/internal/storage"
 	"github.com/gtrindade/ultra-kiew/internal/telegram"
+	"github.com/gtrindade/ultra-kiew/internal/usage"
 )
 
 func main() {
@@ -34,6 +35,7 @@ func main() {
 	storageClient := storage.NewClient()
 	groupManager := group.NewManager(storageClient)
 	eventManager := event.NewManager(storageClient)
+	usageRecorder := usage.NewRecorder(storageClient)
 
 	toolConfigs := map[string]*googlegenai.ToolConfig{
 		diceroller.RollDice: {
@@ -47,6 +49,10 @@ func main() {
 		event.EventManageToolName: {
 			Function: eventManager.Manage,
 			Tool:     event.GetToolConfig(),
+		},
+		usage.UsageReportToolName: {
+			Function: usageRecorder.Manage,
+			Tool:     usage.GetToolConfig(),
 		},
 	}
 
@@ -63,6 +69,10 @@ func main() {
 	eventManager.SetBot(botClient.Bot())
 	eventManager.SetAI(aiClient)
 	groupManager.SetBot(botClient.Bot())
+	// The report is posted to the chat by this code rather than relayed
+	// through the model, so the recorder needs the bot too.
+	usageRecorder.SetBot(botClient.Bot())
+	botClient.SetUsage(usageRecorder)
 	// Roster changes go through the event manager rather than writing
 	// events.json directly, so they stay behind the same mutex as everything
 	// else that touches it.

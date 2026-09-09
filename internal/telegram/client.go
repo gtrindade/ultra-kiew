@@ -13,8 +13,10 @@ import (
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 	"github.com/gtrindade/ultra-kiew/internal/config"
+	"github.com/gtrindade/ultra-kiew/internal/event"
 	"github.com/gtrindade/ultra-kiew/internal/googlegenai"
 	"github.com/gtrindade/ultra-kiew/internal/storage"
+	"github.com/gtrindade/ultra-kiew/internal/usage"
 )
 
 // contextCarryOver is how many recent messages survive a turn the bot answered.
@@ -46,6 +48,10 @@ type Client struct {
 	maxHistorySize int
 	users          map[string]int64
 	usersLock      sync.RWMutex
+
+	// usage records and rations what people spend. Optional: left nil, the
+	// bot behaves exactly as it did before there were quotas.
+	usage *usage.Recorder
 
 	// selfID is this bot's own Telegram user ID, so a reply to something the
 	// bot said can be recognised by identity rather than by matching the
@@ -183,6 +189,12 @@ func NewBot(config *config.Config, ai *googlegenai.Client, storageClient *storag
 	return c, nil
 }
 
+// SetUsage wires in usage accounting. Without it there is no quota and no
+// report, and every message is served.
+func (c *Client) SetUsage(r *usage.Recorder) {
+	c.usage = r
+}
+
 // Start starts the Telegram bot and listens for updates, returning when the
 // caller's context is cancelled or the process is interrupted.
 //
@@ -214,6 +226,9 @@ func (c *Client) handler(ctx context.Context, b *bot.Bot, update *models.Update)
 
 	isChatPrivate := update.Message.Chat.Type == models.ChatTypePrivate
 
+	// hasPendingInvite doubles as the quota exemption below, so it has to
+	// outlive the block that computes it.
+	var hasPendingInvite bool
 	var systemNote string
 	if isChatPrivate {
 		username := "@" + update.Message.From.Username
@@ -258,6 +273,8 @@ func (c *Client) handler(ctx context.Context, b *bot.Bot, update *models.Update)
 			}
 		}
 
+		hasPendingInvite = len(pendingEvents) > 0
+
 		if len(pendingEvents) == 1 {
 			p := pendingEvents[0]
 			systemNote = fmt.Sprintf("This user has exactly ONE pending event invite: %q on %s. If this message is an answer to that invite, work out whether it is yes, no or late and call event_manage with action='update_status' RIGHT NOW. Do not reply that you will note it down without calling the tool. The system already knows who is speaking and which event this is, so you do not pass a username or an event id.", p.Summary, p.Date)
@@ -286,6 +303,11 @@ func (c *Client) handler(ctx context.Context, b *bot.Bot, update *models.Update)
 	// what happened when it was restarted mid-test. Keeping a bounded tail
 	// means a restart costs recent context instead of all of it.
 	c.addToChatHistory(update)
+	chatTitle := update.Message.Chat.Title
+	if !c.allowTurn(ctx, b, update, chatTitle, hasPendingInvite) {
+		return
+	}
+
 	current := c.getMessageFromUpdate(update)
 	c.logReplyCapture(update, current)
 	prompt := googlegenai.BuildPrompt(googlegenai.Prompt{
@@ -296,13 +318,14 @@ func (c *Client) handler(ctx context.Context, b *bot.Bot, update *models.Update)
 	})
 	c.trimChatHistory(chatID)
 
-	chatTitle := update.Message.Chat.Title
-	response, err = c.ai.SendMessage(ctx, chatID, chatTitle, prompt)
-
+	turn, err := c.ai.SendMessage(ctx, chatID, chatTitle, prompt)
 	if err != nil {
 		log.Printf("Failed to send message to AI: %v", err)
-		response = "Sorry, something went wrong."
+		turn.Text = "Sorry, something went wrong."
 	}
+	response = turn.Text
+
+	c.recordTurn(update, chatTitle, turn)
 
 	var replyParams *models.ReplyParameters
 	if !isChatPrivate {
@@ -329,6 +352,100 @@ func (c *Client) handler(ctx context.Context, b *bot.Bot, update *models.Update)
 			log.Printf("chat %d: failed to deliver the reply: %v", chatID, err)
 		}
 	}
+}
+
+// usageUser names a person in the usage log.
+//
+// The @handle is the identity everything else in this bot keys on, so it is
+// preferred. Accounts without one still need to be told apart from each other,
+// hence the id -- lumping them all under a single key would give them one
+// shared allowance and one meaningless row in every report.
+func usageUser(from *models.User) string {
+	if from.Username != "" {
+		return "@" + from.Username
+	}
+	if from.FirstName != "" {
+		return fmt.Sprintf("%s (id %d)", from.FirstName, from.ID)
+	}
+	return fmt.Sprintf("id %d", from.ID)
+}
+
+// allowTurn decides whether this message gets served, and tells the user when
+// it does not.
+//
+// The check happens before the model is called, because the whole point is to
+// not spend that call. It happens after the trigger check for the same reason
+// in reverse: group chatter the bot was never addressed in costs nothing and
+// must not eat anyone's allowance.
+//
+// A pending event invite suspends the quota entirely. Classification of a turn
+// as a confirmation can only happen afterwards, from the tools it called, so
+// without this exemption someone who had spent their allowance would be unable
+// to answer an invite -- refused before the code could ever discover that
+// answering was all they were doing. The exemption is self-limiting: it exists
+// only while an invite is genuinely outstanding.
+func (c *Client) allowTurn(ctx context.Context, b *bot.Bot, update *models.Update, chatTitle string, hasPendingInvite bool) bool {
+	if c.usage == nil || hasPendingInvite {
+		return true
+	}
+
+	user := usageUser(update.Message.From)
+	remaining, used := c.usage.Allowance(user)
+	if remaining > 0 {
+		return true
+	}
+
+	log.Printf("chat %d: %s is over the %d-message limit (%d used), refusing the turn",
+		update.Message.Chat.ID, user, usage.DailyPromptLimit, used)
+
+	c.usage.Record(usage.Entry{
+		User:      user,
+		UserID:    update.Message.From.ID,
+		ChatID:    update.Message.Chat.ID,
+		ChatTitle: chatTitle,
+		Private:   update.Message.Chat.Type == models.ChatTypePrivate,
+		Kind:      usage.KindBlocked,
+	})
+
+	// Nil-safe for the same reason group.notifyNewMembers is: the decision
+	// must not depend on there being a bot to announce it with.
+	if b != nil {
+		if _, err := b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID:          update.Message.Chat.ID,
+			ReplyParameters: &models.ReplyParameters{MessageID: update.Message.ID},
+			Text:            usage.QuotaMessage(used),
+		}); err != nil {
+			log.Printf("chat %d: could not tell %s about the limit: %v", update.Message.Chat.ID, user, err)
+		}
+	}
+	return false
+}
+
+// recordTurn writes one line of the usage log for a turn that was served.
+//
+// A turn whose only tool calls were event confirmations is logged as a
+// confirmation and does not spend quota. Classifying from what the turn DID,
+// rather than from what the message looked like, is what makes that reliable:
+// "sim", "bora", "vou chegar atrasado" and a reply to the card are all the
+// same act, and none of them is recognisable as one from the text alone.
+func (c *Client) recordTurn(update *models.Update, chatTitle string, turn googlegenai.TurnResult) {
+	if c.usage == nil {
+		return
+	}
+
+	kind := usage.KindPrompt
+	if turn.OnlyCalled(event.EventManageToolName, event.UpdateStatusAction) {
+		kind = usage.KindConfirmation
+	}
+
+	c.usage.Record(usage.Entry{
+		User:      usageUser(update.Message.From),
+		UserID:    update.Message.From.ID,
+		ChatID:    update.Message.Chat.ID,
+		ChatTitle: chatTitle,
+		Private:   update.Message.Chat.Type == models.ChatTypePrivate,
+		Kind:      kind,
+	})
 }
 
 // logReplyCapture records, for one handled message, what Telegram actually

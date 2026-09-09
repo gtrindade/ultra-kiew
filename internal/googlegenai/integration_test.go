@@ -92,10 +92,11 @@ func TestIntegration_EventAI(t *testing.T) {
 	// It should respond asking for the timezone!
 	chatID := int64(-12345)
 
-	resp1, err := aiClient.SendMessage(ctx, chatID, "Test Group", "cria um evento as 21:00")
+	turn1, err := aiClient.SendMessage(ctx, chatID, "Test Group", "cria um evento as 21:00")
 	if err != nil {
 		t.Fatalf("Failed to send message: %v", err)
 	}
+	resp1 := turn1.Text
 	t.Logf("AI Response 1 (Asking for timezone): %s", resp1)
 
 	if !strings.Contains(strings.ToLower(resp1), "fuso") && !strings.Contains(strings.ToLower(resp1), "horário") && !strings.Contains(strings.ToLower(resp1), "horario") {
@@ -104,10 +105,11 @@ func TestIntegration_EventAI(t *testing.T) {
 
 	// 2. We answer "BRT" and the AI should create it in the PAST and fail!
 	// To reliably test past-rejection, we can just ask for "ontem às 21:00" (yesterday at 21:00) or an explicit past absolute date!
-	resp2, err := aiClient.SendMessage(ctx, chatID, "Test Group", "quero o evento para 1 de Janeiro de 2020 às 21:00 BRT. Crie agora mesmo.")
+	turn2, err := aiClient.SendMessage(ctx, chatID, "Test Group", "quero o evento para 1 de Janeiro de 2020 às 21:00 BRT. Crie agora mesmo.")
 	if err != nil {
 		t.Fatalf("Failed to send message 2: %v", err)
 	}
+	resp2 := turn2.Text
 	t.Logf("AI Response 2 (Rejection): %s", resp2)
 
 	// The AI must apologize that the event is in the past.
@@ -116,10 +118,11 @@ func TestIntegration_EventAI(t *testing.T) {
 	}
 
 	// 3. Ask to schedule for future properly!
-	resp3, err := aiClient.SendMessage(ctx, chatID, "Test Group", "blz, então quero o evento para 1 de Janeiro de 2030 às 21:00 BRT")
+	turn3, err := aiClient.SendMessage(ctx, chatID, "Test Group", "blz, então quero o evento para 1 de Janeiro de 2030 às 21:00 BRT")
 	if err != nil {
 		t.Fatalf("Failed to send message 3: %v", err)
 	}
+	resp3 := turn3.Text
 	t.Logf("AI Response 3 (Success): %s", resp3)
 
 	// The AI generates __SILENT__ or empty or confirms briefly because we told it to output __SILENT__ and message.go skips it.

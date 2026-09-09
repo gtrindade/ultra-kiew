@@ -19,9 +19,19 @@ import (
 
 const (
 	EventManageToolName = "event_manage"
-	eventsFileName      = "events.json"
-	groupsFileName      = "groups.json"
-	usersFileName       = "users.json"
+
+	// UpdateStatusAction records one person's answer to an invite.
+	//
+	// Exported because usage accounting has to be able to recognise it: a turn
+	// that did nothing but this is someone confirming attendance, which is the
+	// bot's core job and deliberately does not spend anyone's message quota.
+	// A shared constant rather than a string literal on both sides, so the two
+	// cannot drift apart silently.
+	UpdateStatusAction = "update_status"
+
+	eventsFileName = "events.json"
+	groupsFileName = "groups.json"
+	usersFileName  = "users.json"
 
 	// liveSessionsFileName holds events whose start time has passed but whose
 	// Meet session is still being watched (waiting for it to end, waiting for
@@ -214,7 +224,7 @@ func (m *Manager) Manage(args map[string]any) (string, error) {
 	// update_status is the one action that legitimately targets a chat other
 	// than the caller's: it arrives in a DM and applies to a group event. Every
 	// other action applies to the chat it was sent from, full stop.
-	if action == "update_status" {
+	if action == UpdateStatusAction {
 		return m.updateStatus(args, callerChatID, isPrivate)
 	}
 
@@ -1527,7 +1537,7 @@ Use this when the user asks to re-ping, remind, or re-request an answer from who
 						"action": {
 							Type:        "string",
 							Description: "Action to perform: 'create', 'update', 'remove', 'get', 'update_status', or 'request_responses'",
-							Enum:        []string{"create", "update", "remove", "get", "update_status", "request_responses"},
+							Enum:        []string{"create", "update", "remove", "get", UpdateStatusAction, "request_responses"},
 						},
 						"local_datetime": {
 							Type:        "string",
