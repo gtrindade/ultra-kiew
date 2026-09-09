@@ -64,15 +64,6 @@ const (
 	maxReportWindow = 365 * 24 * time.Hour
 )
 
-// DefaultAdmins is who may grant quota when config.yaml names nobody.
-//
-// A hardcoded owner is not elegant, and the alternative was worse: with
-// config-only admins, a server whose config.yaml was never updated has a quota
-// that nobody on earth can lift, and it fails silently -- the tool just refuses
-// and the operator is left guessing. This is a single-owner bot, so the owner
-// is the sane default. config.yaml's admin_users overrides it entirely.
-var DefaultAdmins = []string{"@guilhermetmg"}
-
 // Kind is what one logged turn was.
 type Kind string
 
@@ -123,10 +114,14 @@ func NewRecorder(storageClient *storage.Client) *Recorder {
 	return &Recorder{storage: storageClient}
 }
 
-// SetAdmins sets who may grant quota.
+// SetAdmins sets who may grant quota, from config.yaml's admin_users.
 //
-// Empty means nobody, deliberately: an unconfigured deployment must not hand
-// the power to raise limits to whoever asks first.
+// Empty means nobody, and there is no built-in fallback: an unconfigured
+// deployment must not hand the power to raise limits to whoever asks first,
+// and guessing an owner from the source would be a worse answer than having
+// none. The cost is that a server whose config.yaml lacks admin_users has a
+// quota nobody can lift, so main logs the active list -- loudly when it is
+// empty -- rather than leaving that to be discovered by a refusal.
 func (r *Recorder) SetAdmins(handles []string) {
 	r.admins = append([]string(nil), handles...)
 }
@@ -235,12 +230,26 @@ func (r *Recorder) Standing(user string) Standing {
 }
 
 // QuotaMessage is what a user is told when they have nothing left.
-func QuotaMessage(s Standing) string {
-	return fmt.Sprintf(
+//
+// admins comes from config rather than being written into the sentence,
+// because the one thing worse than "you are out of messages" is being told to
+// go ask somebody who cannot help. With none configured the offer is omitted
+// entirely rather than pointed at nobody.
+func QuotaMessage(s Standing, admins []string) string {
+	msg := fmt.Sprintf(
 		"Você já usou %d de %d mensagens nas últimas 24 horas, que é o seu limite. "+
-			"A cota vai liberando aos poucos conforme as mensagens antigas completam 24h -- tenta de novo mais tarde, "+
-			"ou fala com o @guilhermetmg se precisar de mais agora.",
+			"A cota vai liberando aos poucos conforme as mensagens antigas completam 24h -- tenta de novo mais tarde",
 		s.Used, s.Limit)
+
+	switch len(admins) {
+	case 0:
+		return msg + "."
+	case 1:
+		return fmt.Sprintf("%s, ou fala com %s se precisar de mais agora.", msg, admins[0])
+	default:
+		return fmt.Sprintf("%s, ou fala com um dos admins (%s) se precisar de mais agora.",
+			msg, strings.Join(admins, ", "))
+	}
 }
 
 // userTotals is one row of a report.

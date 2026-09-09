@@ -406,7 +406,7 @@ func (c *Client) allowTurn(ctx context.Context, b *bot.Bot, update *models.Updat
 		if _, err := b.SendMessage(ctx, &bot.SendMessageParams{
 			ChatID:          update.Message.Chat.ID,
 			ReplyParameters: &models.ReplyParameters{MessageID: update.Message.ID},
-			Text:            usage.QuotaMessage(standing),
+			Text:            usage.QuotaMessage(standing, c.usage.Admins()),
 		}); err != nil {
 			log.Printf("chat %d: could not tell %s about the limit: %v", update.Message.Chat.ID, user, err)
 		}

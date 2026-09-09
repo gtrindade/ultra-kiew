@@ -528,7 +528,7 @@ func TestManageNeedsTheCallerChatContext(t *testing.T) {
 }
 
 func TestQuotaMessageExplainsTheLimitAndHowItRecovers(t *testing.T) {
-	got := QuotaMessage(Standing{Used: 50, Limit: 50})
+	got := QuotaMessage(Standing{Used: 50, Limit: 50}, []string{"@guilhermetmg"})
 
 	if !strings.Contains(got, "50") {
 		t.Errorf("expected the count, got %q", got)
@@ -541,6 +541,33 @@ func TestQuotaMessageExplainsTheLimitAndHowItRecovers(t *testing.T) {
 	// It must not promise an exemption that no longer exists.
 	if strings.Contains(strings.ToLower(got), "confirmar") {
 		t.Errorf("the confirmation exemption is gone and must not be advertised: %q", got)
+	}
+}
+
+// Who to ask comes from config, never from a sentence written months ago.
+// Telling someone to go ask a person who cannot help them is worse than not
+// offering at all.
+func TestQuotaMessagePointsAtTheConfiguredAdmins(t *testing.T) {
+	standing := Standing{Used: 50, Limit: 50}
+
+	one := QuotaMessage(standing, []string{"@chefe"})
+	if !strings.Contains(one, "@chefe") {
+		t.Errorf("expected the configured admin named: %q", one)
+	}
+
+	many := QuotaMessage(standing, []string{"@chefe", "@vice"})
+	if !strings.Contains(many, "@chefe") || !strings.Contains(many, "@vice") {
+		t.Errorf("expected every admin named: %q", many)
+	}
+
+	// With nobody configured there is no one to be sent to, so the offer is
+	// dropped rather than pointed at thin air.
+	none := QuotaMessage(standing, nil)
+	if strings.Contains(none, "fala com") {
+		t.Errorf("expected no referral with no admins configured: %q", none)
+	}
+	if !strings.Contains(none, "50") {
+		t.Errorf("expected the limit still explained: %q", none)
 	}
 }
 

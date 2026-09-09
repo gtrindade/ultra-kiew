@@ -287,10 +287,24 @@ func TestGrantToolConfigMatchesTheDispatchName(t *testing.T) {
 	}
 }
 
-func TestDefaultAdminsIsNotEmpty(t *testing.T) {
-	// An empty default would mean a deployment that never set admin_users has
-	// a quota nobody can lift, and it would fail silently.
-	if len(DefaultAdmins) == 0 {
-		t.Fatal("expected a built-in fallback admin")
+// There is no built-in admin. Authorisation comes from config.yaml alone, so
+// a fallback creeping back in would silently widen who can lift a limit.
+func TestThereIsNoBuiltInAdmin(t *testing.T) {
+	r := setupRecorder(t)
+	if err := r.storage.SaveToDB(usersFileName, map[string]int64{
+		"@guilhermetmg": adminChatID,
+		"@bmaraujo":     userChatID,
+	}); err != nil {
+		t.Fatalf("could not seed users: %v", err)
+	}
+	// SetAdmins deliberately never called: a fresh recorder trusts nobody.
+
+	if len(r.Admins()) != 0 {
+		t.Fatalf("a recorder with no configured admins must trust nobody, got %v", r.Admins())
+	}
+	if _, err := r.Grant(grantArgs(adminChatID, map[string]any{
+		"user": "@bmaraujo", "amount": float64(10),
+	})); err == nil {
+		t.Fatal("expected the grant to be refused with no admins configured")
 	}
 }

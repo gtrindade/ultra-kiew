@@ -94,18 +94,20 @@ func main() {
 // loud at startup.
 //
 // Logged every run because this is the only privileged operation in the bot
-// and it is invisible otherwise: a config typo would silently move the power
-// to nobody, and the only symptom would be the tool refusing an admin who is
-// certain they are one.
+// and it is otherwise invisible: with no built-in fallback, a config.yaml that
+// is missing admin_users -- or has it under a typo'd key -- leaves a quota
+// nobody can lift, and the only other symptom would be grant_quota refusing an
+// admin who is certain they are one. Better a line at boot than that
+// conversation.
 func setUpAdmins(cfg *config.Config, recorder *usage.Recorder) {
-	admins := cfg.AdminUsers
-	source := "config.yaml"
-	if len(admins) == 0 {
-		admins = usage.DefaultAdmins
-		source = "built-in default (set admin_users in config.yaml to change)"
+	recorder.SetAdmins(cfg.AdminUsers)
+
+	if len(cfg.AdminUsers) == 0 {
+		log.Println("Quota admins: NONE configured -- nobody can raise anyone's message limit. " +
+			"Add admin_users to config.yaml to enable it.")
+		return
 	}
-	recorder.SetAdmins(admins)
-	log.Printf("Quota admins: %v -- from %s", admins, source)
+	log.Printf("Quota admins: %v", cfg.AdminUsers)
 }
 
 // setUpMeet wires Google Meet integration into the event manager, or logs

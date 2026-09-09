@@ -36,6 +36,13 @@ Create a config.yaml file like this:
 telegram_bot_token: "<your-telegram-token>"
 gemini_api_key: "<your-gemini-key>"
 bot_name: "ultra-kiew"
+
+# Who may raise someone's message quota with the grant_quota tool. Nobody
+# else can, in any chat, however they ask. Leave this out and the tool is
+# simply unavailable -- the bot logs the active list at startup.
+admin_users:
+  - "@your-telegram-handle"
+
 dnd_tools:
   host: "localhost"
   port: 3306

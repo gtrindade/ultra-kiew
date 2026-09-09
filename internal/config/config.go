@@ -54,10 +54,10 @@ type Config struct {
 	// Everything else in this bot is open to whoever is in the chat; this is
 	// the one power that is not.
 	//
-	// Left empty it falls back to usage.DefaultAdmins rather than to nobody,
-	// so a deployment that forgets this field still has a working escape
-	// hatch instead of a limit no one can lift. The active list is logged at
-	// startup either way.
+	// Left empty, nobody can grant -- there is no built-in fallback, so this
+	// field is the only source of truth. That means forgetting it on a new
+	// server leaves a quota no one can lift, which is why the active list is
+	// logged at startup and the empty case is logged loudly.
 	AdminUsers []string `yaml:"admin_users"`
 
 	GeminiAPIKey string         `yaml:"gemini_api_key"`
