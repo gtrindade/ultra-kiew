@@ -58,6 +58,10 @@ func main() {
 			Function: usageRecorder.Grant,
 			Tool:     usage.GetGrantToolConfig(),
 		},
+		usage.QuotaStatusToolName: {
+			Function: usageRecorder.QuotaStatus,
+			Tool:     usage.GetQuotaStatusToolConfig(),
+		},
 	}
 
 	aiClient, err := googlegenai.NewClient(ctx, toolConfigs, storageClient, dbClient, config)

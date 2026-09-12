@@ -23,6 +23,11 @@ const (
 	// Real sessions break for pizza: someone leaving closes a conference
 	// record and rejoining opens a new one on the same space, and without this
 	// window the first bathroom break would end the session.
+	// earlyWatchWindow is how long before an event starts the bot begins
+	// reporting who is in the call. People turn up early, and "fulano já
+	// está na call" is only useful while it is still worth joining them.
+	earlyWatchWindow = 30 * time.Minute
+
 	meetGracePeriod = 20 * time.Minute
 
 	// meetNoShowGrace is how long to wait for a first conference record to
@@ -241,11 +246,21 @@ func (m *Manager) advanceMeetSession(ctx context.Context, chatIDStr string, ev E
 // new ones (and refreshes end times on ones already known -- a record open on
 // one poll can have ended by the next), and decides whether the session
 // counts as over yet.
-func (m *Manager) pollConferenceRecords(ctx context.Context, chatIDStr string, meetInfo *MeetInfo, eventTimestamp, now int64) (changed bool) {
-	records, err := m.meet.ListConferenceRecords(ctx, meetInfo.SpaceName)
+// syncSegments records which conference records exist and refreshes the end
+// times of ones already known.
+//
+// Split out of pollConferenceRecords so it can be run before an event starts
+// without dragging the end-of-session judgement along with it. That judgement
+// is anchored on the event's start time and is actively wrong beforehand: if
+// someone drops into the space half an hour early and leaves again, their
+// record closes, and the "everything ended, grace period elapsed" rule would
+// declare the session over before it had begun -- posting a recap for a
+// meeting nobody had attended yet, permanently, because RecapPosted latches.
+func (m *Manager) syncSegments(ctx context.Context, chatIDStr string, meetInfo *MeetInfo) (records []meet.ConferenceRecord, changed bool, err error) {
+	records, err = m.meet.ListConferenceRecords(ctx, meetInfo.SpaceName)
 	if err != nil {
 		log.Printf("could not list conference records for chat %s (%s): %v", chatIDStr, meetInfo.SpaceName, err)
-		return false
+		return nil, false, err
 	}
 
 	for _, r := range records {
@@ -256,6 +271,38 @@ func (m *Manager) pollConferenceRecords(ctx context.Context, chatIDStr string, m
 			meetInfo.Segments[i].EndTime = r.EndTime
 			changed = true
 		}
+	}
+	return records, changed, nil
+}
+
+// watchEarlyArrivals reports who is already in the call in the run-up to an
+// event, without starting the session lifecycle.
+//
+// Deliberately narrow: it discovers conference records and announces joins and
+// leaves, and it never decides the session is over. Everything about ending --
+// the no-show grace, the all-records-closed rule, the recap -- stays keyed to
+// the event's actual start time and runs only from the live-session loop.
+//
+// Participant state carries straight into that live session, so somebody who
+// joined early and stayed is not announced a second time when the event starts.
+func (m *Manager) watchEarlyArrivals(ctx context.Context, chatIDStr string, ev Event) (changed bool) {
+	if m.meet == nil || ev.Meet == nil || ev.Meet.SessionEnded {
+		return false
+	}
+
+	_, segmentsChanged, err := m.syncSegments(ctx, chatIDStr, ev.Meet)
+	if err != nil {
+		return segmentsChanged
+	}
+
+	participantsChanged := m.pollParticipants(ctx, chatIDStr, ev, ev.Meet)
+	return segmentsChanged || participantsChanged
+}
+
+func (m *Manager) pollConferenceRecords(ctx context.Context, chatIDStr string, meetInfo *MeetInfo, eventTimestamp, now int64) (changed bool) {
+	records, changed, err := m.syncSegments(ctx, chatIDStr, meetInfo)
+	if err != nil {
+		return false
 	}
 
 	if len(records) == 0 {

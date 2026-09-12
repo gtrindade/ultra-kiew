@@ -384,7 +384,7 @@ func (c *Client) allowTurn(ctx context.Context, b *bot.Bot, update *models.Updat
 
 	user := usageUser(update.Message.From)
 	standing := c.usage.Standing(user)
-	if standing.Remaining > 0 {
+	if standing.Allowed() {
 		return true
 	}
 

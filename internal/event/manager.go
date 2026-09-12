@@ -1206,6 +1206,19 @@ func (m *Manager) runMonitorTick(ctx context.Context) {
 			eventsChanged = true
 		}
 
+		// Report who is already in the call in the run-up to the event. This
+		// stays in the upcoming-event loop on purpose: the event must not
+		// move to live-sessions early, or create() would see the slot as
+		// taken for an event that has not happened and the session's own
+		// end-detection would start running against a start time still in
+		// the future.
+		if ev.Timestamp > 0 && ev.Timestamp > now && ev.Timestamp-now <= int64(earlyWatchWindow.Seconds()) {
+			if m.watchEarlyArrivals(ctx, chatIDStr, ev) {
+				events[chatIDStr] = ev
+				eventsChanged = true
+			}
+		}
+
 		if ev.Timestamp > 0 && ev.Timestamp <= now {
 			if !ev.ReminderNowSent {
 				m.sendReminder(chatIDStr, ev, "agora")

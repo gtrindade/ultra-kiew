@@ -30,6 +30,9 @@ const (
 	// allowance.
 	GrantQuotaToolName = "grant_quota"
 
+	// QuotaStatusToolName is the tool for "how much has everyone got left".
+	QuotaStatusToolName = "quota_status"
+
 	// usersFileName maps @handle to Telegram chat ID. Used here only to
 	// identify the caller and to check a grant is aimed at somebody real.
 	usersFileName = "users.json"
@@ -183,6 +186,12 @@ func (r *Recorder) scan(fn func(Entry)) error {
 
 // Standing is where one person sits against their quota right now.
 type Standing struct {
+	// User is who this is about.
+	User string
+	// Unlimited is true for an administrator, who is never rationed. Whoever
+	// can lift everyone else's limit gains nothing from having one of their
+	// own, and being locked out by it would leave nobody able to unlock it.
+	Unlimited bool
 	// Used is messages spent inside the window.
 	Used int
 	// Granted is extra allowance handed out inside the window.
@@ -203,6 +212,7 @@ type Standing struct {
 // to take the bot down, so an unreadable log fails open and says so.
 func (r *Recorder) Standing(user string) Standing {
 	cutoff := time.Now().Add(-QuotaWindow).Unix()
+	unlimited := r.isAdmin(user)
 
 	var used, granted int
 	err := r.scan(func(e Entry) {
@@ -218,7 +228,7 @@ func (r *Recorder) Standing(user string) Standing {
 	})
 	if err != nil {
 		log.Printf("usage: could not read the log to check %s's quota, allowing the message: %v", user, err)
-		return Standing{Limit: DailyPromptLimit, Remaining: DailyPromptLimit}
+		return Standing{User: user, Unlimited: unlimited, Limit: DailyPromptLimit, Remaining: DailyPromptLimit}
 	}
 
 	limit := DailyPromptLimit + granted
@@ -226,7 +236,24 @@ func (r *Recorder) Standing(user string) Standing {
 	if remaining < 0 {
 		remaining = 0
 	}
-	return Standing{Used: used, Granted: granted, Limit: limit, Remaining: remaining}
+	return Standing{User: user, Unlimited: unlimited, Used: used, Granted: granted, Limit: limit, Remaining: remaining}
+}
+
+// Allowed reports whether this person may send another message.
+func (s Standing) Allowed() bool {
+	return s.Unlimited || s.Remaining > 0
+}
+
+// Describe renders one person's position in a single line.
+func (s Standing) Describe() string {
+	if s.Unlimited {
+		return fmt.Sprintf("%s — %s (admin, sem limite)", s.User, plural(s.Used, "mensagem", "mensagens"))
+	}
+	line := fmt.Sprintf("%s — %d de %d, restam %d", s.User, s.Used, s.Limit, s.Remaining)
+	if s.Granted > 0 {
+		line += fmt.Sprintf(" (inclui +%d de cota extra)", s.Granted)
+	}
+	return line
 }
 
 // QuotaMessage is what a user is told when they have nothing left.
@@ -728,6 +755,125 @@ func GetGrantToolConfig() *genai.Tool {
 						},
 					},
 					Required: []string{"user", "amount"},
+				},
+			},
+		},
+	}
+}
+
+// QuotaStatus answers "quanto fulano já usou" and "como está a cota de todo
+// mundo".
+//
+// Private chat only, for the same reason Grant is: the caller is identified
+// from the chat ID, and in a group there is nothing to identify them with. An
+// administrator may ask about anyone, or about everyone at once. Anyone else
+// may ask about themselves and nobody else -- not because a remaining count is
+// a secret, but because a tool that answered for arbitrary handles would let
+// the model be talked into a roll call by whoever asked nicely.
+func (r *Recorder) QuotaStatus(args map[string]any) (string, error) {
+	callerChatID, ok := args[googlegenai.ArgCallerChatID].(int64)
+	if !ok {
+		return "", fmt.Errorf("internal error: caller chat context is missing")
+	}
+	isPrivate, _ := args[googlegenai.ArgIsPrivate].(bool)
+
+	if !isPrivate {
+		return "", fmt.Errorf("quotas can only be checked in a private DM with the bot, since that is the only place I can tell who is asking. Tell the user to ask me directly")
+	}
+
+	caller := r.callerHandle(callerChatID)
+	if caller == "" {
+		return "", fmt.Errorf("this user is not recognised yet, so their quota cannot be looked up")
+	}
+	admin := r.isAdmin(caller)
+
+	target, _ := args["user"].(string)
+	target = strings.TrimSpace(target)
+	if target != "" && !strings.HasPrefix(target, "@") {
+		target = "@" + target
+	}
+
+	// Everyone, which only an admin may ask for.
+	if target == "" {
+		if !admin {
+			return r.Standing(caller).Describe() + "\n\n(Só um administrador pode ver a cota dos outros.)", nil
+		}
+		return r.everyoneStanding()
+	}
+
+	if !admin && !strings.EqualFold(target, caller) {
+		return "", fmt.Errorf("only an administrator can look up somebody else's quota. Tell the user they can ask about their own")
+	}
+	return r.Standing(target).Describe(), nil
+}
+
+// everyoneStanding reports where every person the bot has ever seen sits right
+// now, busiest first.
+func (r *Recorder) everyoneStanding() (string, error) {
+	knownUsers := make(map[string]int64)
+	r.storage.LoadOrLog(usersFileName, &knownUsers)
+
+	// Anyone with activity in the window counts too, even if users.json has
+	// somehow lost them -- the log is the record of what actually happened.
+	seen := map[string]string{}
+	for handle := range knownUsers {
+		seen[strings.ToLower(handle)] = handle
+	}
+	cutoff := time.Now().Add(-QuotaWindow).Unix()
+	if err := r.scan(func(e Entry) {
+		if e.Timestamp >= cutoff && e.User != "" {
+			if _, known := seen[strings.ToLower(e.User)]; !known {
+				seen[strings.ToLower(e.User)] = e.User
+			}
+		}
+	}); err != nil {
+		return "", fmt.Errorf("could not read the usage log: %w", err)
+	}
+
+	if len(seen) == 0 {
+		return "Ninguém falou comigo ainda, então não há cota para mostrar.", nil
+	}
+
+	standings := make([]Standing, 0, len(seen))
+	for _, handle := range seen {
+		standings = append(standings, r.Standing(handle))
+	}
+	// Busiest first, then by name so two calls over the same data agree.
+	sort.Slice(standings, func(i, j int) bool {
+		if standings[i].Used != standings[j].Used {
+			return standings[i].Used > standings[j].Used
+		}
+		return strings.ToLower(standings[i].User) < strings.ToLower(standings[j].User)
+	})
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "Cotas agora (últimas %d horas, limite base %d):\n\n", int(QuotaWindow.Hours()), DailyPromptLimit)
+	for _, s := range standings {
+		sb.WriteString(s.Describe())
+		sb.WriteString("\n")
+	}
+	return strings.TrimRight(sb.String(), "\n"), nil
+}
+
+func GetQuotaStatusToolConfig() *genai.Tool {
+	return &genai.Tool{
+		FunctionDeclarations: []*genai.FunctionDeclaration{
+			{
+				Name: QuotaStatusToolName,
+				Description: "Reports how much of their message quota people have left right now. " +
+					"Call it for 'quanto eu já usei', 'como está a cota do @fulano', 'mostra as cotas de todo mundo'. " +
+					"Leave 'user' out to cover everyone, which only an administrator may do; give a 'user' to ask about one person. " +
+					"Anyone may ask about themselves; only an administrator may ask about somebody else, and the code enforces that. " +
+					"Private DM only. This is about quota standing right now -- for how much people TALKED to you over some period, use " + UsageReportToolName + " instead.",
+				Parameters: &genai.Schema{
+					Type: "object",
+					Properties: map[string]*genai.Schema{
+						"user": {
+							Type:        "string",
+							Description: "The @username to check. Omit to list everyone.",
+							Example:     "@bmaraujo",
+						},
+					},
 				},
 			},
 		},
