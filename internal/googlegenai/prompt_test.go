@@ -332,3 +332,45 @@ func TestReplyBlockSaysTheQuoteIsTheSubjectButNotTheAuthority(t *testing.T) {
 		t.Errorf("this wording blocks the legitimate answer-the-quoted-question case:\n%s", got)
 	}
 }
+
+// The clock the model is shown has to be the same clock the event card shows,
+// or it will subtract one from the other and be wrong by the offset between
+// them -- which is what happened: 21:00 in Sao Paulo minus 18:02 in New York
+// answered as "2h58" for something 1h58 away.
+func TestBuildPromptStatesTheTimeInTheChatsZone(t *testing.T) {
+	got := BuildPrompt(Prompt{Message: "falta quanto?", Timezone: "America/Sao_Paulo"})
+
+	if !strings.Contains(got, "America/Sao_Paulo") {
+		t.Errorf("expected the zone named:\n%s", got)
+	}
+	// Offsets are seasonal there, so accept either.
+	if !strings.Contains(got, "-03:00") && !strings.Contains(got, "-02:00") {
+		t.Errorf("expected the time rendered in that zone:\n%s", got)
+	}
+	if !strings.Contains(strings.ToLower(got), "never convert between zones") {
+		t.Errorf("expected the model told not to convert:\n%s", got)
+	}
+}
+
+// A chat with no zone on file still gets a usable clock, and is told that is
+// what it is rather than being left to assume the group's.
+func TestBuildPromptSaysWhenTheZoneIsTheServersOwn(t *testing.T) {
+	got := BuildPrompt(Prompt{Message: "oi"})
+
+	if !strings.Contains(got, "<current_time>") {
+		t.Fatalf("the current time is not optional:\n%s", got)
+	}
+	if !strings.Contains(got, "none recorded") {
+		t.Errorf("expected the fallback stated plainly:\n%s", got)
+	}
+}
+
+// An unknown zone must degrade to the server clock rather than panicking or
+// emitting a blank time.
+func TestBuildPromptSurvivesAnUnknownZone(t *testing.T) {
+	got := BuildPrompt(Prompt{Message: "oi", Timezone: "Marte/Olympus"})
+
+	if !strings.Contains(got, "<current_time>") || !strings.Contains(got, "none recorded") {
+		t.Errorf("expected a graceful fallback:\n%s", got)
+	}
+}

@@ -254,7 +254,9 @@ func (m *Manager) Manage(args map[string]any) (string, error) {
 		if !exists {
 			return "No event is scheduled for this chat.", nil
 		}
-		return fmt.Sprintf("The current event is %q on %s.", event.Summary, event.Date), nil
+		groups := make(map[string]Group)
+		m.storage.LoadOrLog(groupsFileName, &groups)
+		return describeEventTiming(event, groups[chatIDStr], time.Now()), nil
 
 	case "update":
 		return m.update(args, callerChatID, chatIDStr, events)
@@ -834,6 +836,85 @@ func (m *Manager) SyncGroupMembers(chatIDStr string, users []string) (string, er
 		return fmt.Sprintf("The upcoming event %q was updated: %v removed from the card.", event.Summary, removed), nil
 	default:
 		return fmt.Sprintf("The upcoming event %q was updated: %v added as still unanswered, %v removed.", event.Summary, added, removed), nil
+	}
+}
+
+// describeEventTiming answers "when is it, and how long until it" with the
+// arithmetic already done.
+//
+// The countdown is computed here rather than left to the model because the
+// model got it wrong in production, and could not have got it right: it was
+// shown the event as a bare wall clock ("21:00") and the current time in the
+// server's zone, and subtracted one from the other. Those were 21:00 in Sao
+// Paulo and 18:02 in New York, so it answered "2h58" for something an hour
+// closer than that, then apologised and produced a second wrong number when
+// challenged.
+//
+// Timestamp is absolute, so this comparison cannot suffer that: both sides are
+// instants, and the zone is used only to render them for a human.
+func describeEventTiming(event Event, group Group, now time.Time) string {
+	if event.Timestamp <= 0 {
+		// Pre-dates timestamps, or was written by an older build. The date
+		// string is all there is, and saying so is better than computing a
+		// countdown from nothing.
+		return fmt.Sprintf("The current event is %q on %s. I have no exact timestamp stored for it, so I cannot say precisely how long until it starts -- tell the user the date and do NOT estimate a countdown yourself.", event.Summary, event.Date)
+	}
+
+	start := time.Unix(event.Timestamp, 0)
+	if group.Timezone != "" {
+		if loc, err := time.LoadLocation(group.Timezone); err == nil {
+			start = start.In(loc)
+		}
+	}
+
+	return fmt.Sprintf("The current event is %q on %s (exactly %s). %s This figure is computed from the clock, in the right timezone, and is correct: relay it as it is and never recompute it or adjust it for any timezone.",
+		event.Summary, event.Date, start.Format(time.RFC3339), formatCountdown(start.Sub(now)))
+}
+
+// formatCountdown renders how long until a moment, in Portuguese, as prose the
+// model can pass straight through.
+func formatCountdown(d time.Duration) string {
+	if d < 0 {
+		elapsed := -d
+		if elapsed < time.Minute {
+			return "It started just now."
+		}
+		return fmt.Sprintf("It already started, %s ago.", humanDuration(elapsed))
+	}
+	if d < time.Minute {
+		return "It starts in less than a minute."
+	}
+	return fmt.Sprintf("It starts in %s.", humanDuration(d))
+}
+
+// humanDuration renders a span as "2 dias e 3 horas" / "1 hora e 58 minutos".
+//
+// Only the two largest units, because that is how people say it and because a
+// trailing "e 12 segundos" invites the model to do its own rounding.
+func humanDuration(d time.Duration) string {
+	totalMinutes := int(d.Minutes())
+	days := totalMinutes / (24 * 60)
+	hours := (totalMinutes % (24 * 60)) / 60
+	minutes := totalMinutes % 60
+
+	unit := func(n int, one, many string) string {
+		if n == 1 {
+			return fmt.Sprintf("%d %s", n, one)
+		}
+		return fmt.Sprintf("%d %s", n, many)
+	}
+
+	switch {
+	case days > 0 && hours > 0:
+		return unit(days, "dia", "dias") + " e " + unit(hours, "hora", "horas")
+	case days > 0:
+		return unit(days, "dia", "dias")
+	case hours > 0 && minutes > 0:
+		return unit(hours, "hora", "horas") + " e " + unit(minutes, "minuto", "minutos")
+	case hours > 0:
+		return unit(hours, "hora", "horas")
+	default:
+		return unit(minutes, "minuto", "minutos")
 	}
 }
 

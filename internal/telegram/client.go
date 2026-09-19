@@ -309,6 +309,7 @@ func (c *Client) handler(ctx context.Context, b *bot.Bot, update *models.Update)
 		SystemNote: systemNote,
 		Message:    current.String(),
 		ReplyingTo: current.ReplyContext(),
+		Timezone:   c.chatTimezone(chatID),
 	})
 	c.trimChatHistory(chatID)
 
@@ -428,6 +429,22 @@ func (c *Client) recordTurn(update *models.Update, chatTitle string) {
 		Private:   update.Message.Chat.Type == models.ChatTypePrivate,
 		Kind:      usage.KindPrompt,
 	})
+}
+
+// chatTimezone reports the IANA zone a chat schedules in, or "" if it has none
+// on file.
+//
+// groups.json is read here directly, with a local struct rather than the event
+// or group package's type, for the same reason events.json is read that way a
+// few lines up: this layer needs one field out of it and importing a whole
+// package to name a string is not worth the coupling. It is read-only -- the
+// zone is written by whoever creates the event, never from here.
+func (c *Client) chatTimezone(chatID int64) string {
+	var groups map[string]struct {
+		Timezone string `json:"timezone"`
+	}
+	c.storage.LoadOrLog("groups.json", &groups)
+	return groups[fmt.Sprintf("%d", chatID)].Timezone
 }
 
 // logReplyCapture records, for one handled message, what Telegram actually

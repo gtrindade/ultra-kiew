@@ -102,6 +102,17 @@ type Prompt struct {
 	// ReplyingTo is the message Message was a reply to, already rendered as
 	// "author: text". Empty when the message was not a reply.
 	ReplyingTo string
+
+	// Timezone is the IANA zone this chat schedules in, and the zone the
+	// current time is stated in. Empty falls back to the server's own zone.
+	//
+	// This exists because the server is not where the players are. Rendering
+	// "now" in the server's zone while every event card shows a wall clock in
+	// the group's produced two clocks the model had no way to know were
+	// different -- so "faltam quantas horas?" got answered by subtracting a
+	// 21:00 in Sao Paulo from an 18:02 in New York, confidently, and wrong by
+	// the offset between them.
+	Timezone string
 }
 
 // BuildPrompt wraps the conversation context in explicit delimiters and states
@@ -125,12 +136,33 @@ type Prompt struct {
 //
 // It is exported because the Telegram layer owns the transcript, but the prompt
 // shape is decided here, in one place.
+// currentTime renders "now" in the chat's own zone, and says which zone that
+// is, so the model is never left inferring it.
+//
+// Both halves matter. The offset makes the timestamp unambiguous on its own;
+// naming the zone is what tells the model that this clock and the one on the
+// event card are the same clock, which is the comparison it was getting wrong.
+func (p Prompt) currentTime() string {
+	now := time.Now()
+	zone := "the server's own timezone -- this chat has none recorded"
+
+	if p.Timezone != "" {
+		if loc, err := time.LoadLocation(p.Timezone); err == nil {
+			now = now.In(loc)
+			zone = fmt.Sprintf("%s, this chat's timezone and the one every event time is written in", p.Timezone)
+		}
+	}
+
+	return fmt.Sprintf("%s\nThis is %s.\nEvery time you are shown is already in this zone. Never convert between zones, and never subtract one clock from another to work out how long until something -- call the tool, it does that arithmetic for you.",
+		now.Format(time.RFC3339), zone)
+}
+
 func BuildPrompt(p Prompt) string {
 	var sb strings.Builder
 
-	sb.WriteString("<current_time>")
-	sb.WriteString(time.Now().Format(time.RFC3339))
-	sb.WriteString("</current_time>\n\n")
+	sb.WriteString("<current_time>\n")
+	sb.WriteString(p.currentTime())
+	sb.WriteString("\n</current_time>\n\n")
 
 	if strings.TrimSpace(p.History) != "" {
 		sb.WriteString("<conversation_context>\n")
