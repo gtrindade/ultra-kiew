@@ -77,10 +77,10 @@ func TestASymlinkedVersionDirectoryIsStillAVersion(t *testing.T) {
 	}
 }
 
-// The "(current)" marker never worked for a version this bot had switched to.
-// switchFoundryVersion writes an ABSOLUTE symlink, and the old check compared
-// the raw link text ("/home/x/foundry/FoundryVTT-13.331") against a bare
-// directory name ("FoundryVTT-13.331"). Those are never equal.
+// An absolute link still has to be recognised. It is what switchFoundryVersion
+// used to write, so any install the bot switched before this change still has
+// one, and the old text comparison never matched it: "/home/x/Server-13.351"
+// against a bare "Server-13.351".
 func TestTheCurrentVersionIsMarkedForAnAbsoluteSymlink(t *testing.T) {
 	dir := t.TempDir()
 	mkVersion(t, dir, "12.331")
@@ -259,5 +259,90 @@ func TestTheSymlinkItselfIsNotListedAsAVersion(t *testing.T) {
 	}
 	if strings.Count(got, "13.331") != 1 {
 		t.Errorf("expected the version listed exactly once, got:\n%s", got)
+	}
+}
+
+// The real server layout, reproduced from `ls -lah` on the box:
+//
+//	Data/
+//	Server -> Server-13.351
+//	Server-13.351/
+//	Server-14.368/
+//
+// This is the case that was broken: the constants said FoundryVTT/FoundryVTT-,
+// nothing matched, and the listing came back empty while Foundry ran fine.
+func TestTheRealServerLayoutLists(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "Data"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mkVersion(t, dir, "13.351")
+	mkVersion(t, dir, "14.368")
+	linkOrSkip(t, versionPrefix+"13.351", filepath.Join(dir, symlink)) // relative, as on the server
+
+	got, err := foundryClient(t, dir).listFoundryVersions()
+	if err != nil {
+		t.Fatalf("list failed: %v", err)
+	}
+
+	if !strings.Contains(got, "13.351 (current)") {
+		t.Errorf("expected the linked version marked current, got:\n%s", got)
+	}
+	if !strings.Contains(got, "14.368") {
+		t.Errorf("expected the other version listed, got:\n%s", got)
+	}
+	// Data sits alongside the versions and is not one, and the link itself
+	// must not appear as something to switch to.
+	//
+	// Asserted on the listed lines rather than on the whole message,
+	// because the message also contains the directory path -- and a
+	// substring check for "Data" against a Windows temp path matches
+	// "AppData", which is how an earlier version of this test failed
+	// against perfectly correct output.
+	lines := strings.Split(strings.TrimSpace(got), "\n")
+	listed := lines[1:]
+	if len(listed) != 2 {
+		t.Fatalf("expected exactly two versions listed, got %d:\n%s", len(listed), got)
+	}
+	for _, line := range listed {
+		if line != "13.351 (current)" && line != "14.368" {
+			t.Errorf("unexpected entry %q in the version list:\n%s", line, got)
+		}
+	}
+}
+
+// The bot now writes the same kind of link that is already there. An absolute
+// one would still work, but it would quietly make the install unmovable and
+// stop matching what a person writes by hand.
+func TestSwitchingWritesARelativeSymlink(t *testing.T) {
+	dir := t.TempDir()
+	mkVersion(t, dir, "13.351")
+	mkVersion(t, dir, "14.368")
+	linkOrSkip(t, versionPrefix+"13.351", filepath.Join(dir, symlink))
+
+	c := foundryClient(t, dir)
+	// Go straight at the symlink step: the real switch also restarts systemd,
+	// which is not this machine's business.
+	if err := c.overrideSymlink(versionPrefix+"14.368", filepath.Join(dir, symlink)); err != nil {
+		t.Fatalf("overrideSymlink: %v", err)
+	}
+
+	target, err := os.Readlink(filepath.Join(dir, symlink))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target != versionPrefix+"14.368" {
+		t.Errorf("expected a relative target, got %q", target)
+	}
+	if filepath.IsAbs(target) {
+		t.Errorf("the link must stay relative, got %q", target)
+	}
+
+	got, err := c.listFoundryVersions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "14.368 (current)") {
+		t.Errorf("expected the new version marked current, got:\n%s", got)
 	}
 }

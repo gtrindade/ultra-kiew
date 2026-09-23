@@ -14,12 +14,23 @@ const (
 	// FoundryVTTToolName is the name of the tool that manages FoundryVTT versions
 	FoundryVTTToolName = "foundry_vtt"
 
-	serviceFileName = "foundryvtt.service"
-	symlink         = "FoundryVTT"
-
-	// versionPrefix is what an installed version directory is called:
-	// FoundryVTT-13.331 and so on. The symlink above is deliberately NOT
-	// prefixed, which is what keeps it out of the version list.
+	// symlink is the link inside the install directory that points at the
+	// version currently in use, and versionPrefix is what an installed
+	// version directory is called: Server-13.351, Server-14.368 and so on.
+	//
+	// These were "FoundryVTT" and "FoundryVTT-", which matched nothing on the
+	// actual server and is why the listing came back empty while Foundry ran
+	// perfectly well. The real layout is:
+	//
+	//	<directory>/Data/                     -- Foundry's data, not a version
+	//	<directory>/Server -> Server-13.351   -- the active version
+	//	<directory>/Server-13.351/
+	//	<directory>/Server-14.368/
+	//
+	// Data is excluded for free: it does not carry the prefix. The symlink is
+	// deliberately NOT prefixed either, which is what keeps it out of the
+	// version list.
+	symlink       = "Server"
 	versionPrefix = symlink + "-"
 
 	// maxListedEntries bounds what a failed listing reports back, so a
@@ -112,12 +123,13 @@ func (c *Client) listFoundryVersions() (string, error) {
 		return "", fmt.Errorf("failed to read the FoundryVTT directory %s: %w", dir, err)
 	}
 
-	// Stat rather than Readlink, and compared with SameFile: the link may be
-	// absolute (which is how switchFoundryVersion writes it) or relative
-	// (which is how a person writes it by hand), and comparing the raw link
-	// text against a bare directory name only ever matched the second kind.
-	// The "(current)" marker was therefore never shown for any version this
-	// bot had switched to itself.
+	// Stat rather than Readlink, and compared with SameFile, so that the link
+	// is recognised whether it is relative (Server -> Server-13.351, what is
+	// on the server and what switchFoundryVersion now writes) or absolute
+	// (what it used to write). Comparing raw link text against a bare
+	// directory name only ever matched the first kind, so the "(current)"
+	// marker silently stopped working for any version the bot switched to
+	// itself.
 	var currentInfo os.FileInfo
 	if info, err := os.Stat(filepath.Join(dir, symlink)); err == nil {
 		currentInfo = info
@@ -177,7 +189,7 @@ func emptyFoundryListing(dir string, entries []os.DirEntry, ignored []string) st
 		listed = append(listed[:maxListedEntries:maxListedEntries], fmt.Sprintf("...and %d more", len(ignored)-maxListedEntries))
 	}
 
-	return fmt.Sprintf("No FoundryVTT versions found in %s. A version has to be a directory named %s<version>, for example %s13.331. That directory holds %d entries, none of which match: %s. Report this to the user exactly, including the path and what was found, so they can see whether the path is wrong or the folders are named differently.",
+	return fmt.Sprintf("No FoundryVTT versions found in %s. A version has to be a directory named %s<version>, for example %s13.351. That directory holds %d entries, none of which match: %s. Report this to the user exactly, including the path and what was found, so they can see whether the path is wrong or the folders are named differently.",
 		dir, versionPrefix, versionPrefix, len(entries), strings.Join(listed, ", "))
 }
 
@@ -190,15 +202,19 @@ func (c *Client) switchFoundryVersion(version string) (string, error) {
 		return "", fmt.Errorf("version %s does not exist", version)
 	}
 
-	src := filepath.Join(dir, versionPrefix+version)
+	// A RELATIVE target, matching the link already on the server
+	// (Server -> Server-13.351) rather than an absolute one. It keeps the
+	// whole install directory movable, and it means a link the bot writes
+	// looks exactly like one written by hand.
 	dst := filepath.Join(dir, symlink)
-	if err := c.overrideSymlink(src, dst); err != nil {
+	if err := c.overrideSymlink(versionPrefix+version, dst); err != nil {
 		return "", fmt.Errorf("failed to update symlink: %w", err)
 	}
 
-	if err := c.runSystemCommand("sudo", "systemctl", "daemon-reload"); err != nil {
-		return "", fmt.Errorf("failed to reload systemd: %w", err)
-	}
+	// There was a "systemctl daemon-reload" here. It re-reads unit files, and
+	// repointing a symlink changes no unit file -- systemd resolves ExecStart
+	// at exec time. So it could never help, and as a sudo call that aborts the
+	// switch when it fails, it could only hurt.
 
 	if err := c.runSystemCommand("sudo", "systemctl", "restart", "foundryvtt"); err != nil {
 		return "", fmt.Errorf("failed to restart foundryvtt service: %w", err)
