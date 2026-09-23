@@ -201,6 +201,20 @@ func BuildPrompt(p Prompt) string {
 	return sb.String()
 }
 
+// SendMessageWithParts sends a message with multiple parts to the chat and returns the response text.
+func (c *Client) SendMessageWithParts(ctx context.Context, chatID int64, parts []*genai.Part) (string, error) {
+	chat, err := c.GetChat(ctx, chatID)
+	if err != nil {
+		return "", fmt.Errorf("failed to create new chat: %w", err)
+	}
+	result, _, err := c.sendWithRetry(ctx, chat, chatID, parts...)
+	if err != nil {
+		return "", err
+	}
+
+	return result.Text(), nil
+}
+
 // SendMessage runs one conversational turn for a chat, resolving any tool calls
 // the model makes along the way.
 //

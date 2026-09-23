@@ -15,6 +15,9 @@ var (
 	// BasePath is the default base path for storage.
 	BasePath = "data"
 
+	// PDFsPath is the path where PDF files are stored.
+	PDFsPath = "pdfs"
+
 	// DBPath is the path where database files are stored.
 	DBPath = "db"
 

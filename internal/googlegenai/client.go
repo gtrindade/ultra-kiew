@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"path"
+	"path/filepath"
 	"sync"
 
 	"github.com/gtrindade/ultra-kiew/internal/config"
@@ -23,6 +25,12 @@ const (
 	// often", not just a retry target. gemini-3.1-flash-lite is the same cost
 	// tier, one generation newer.
 	Model = "gemini-3.1-flash-lite"
+
+	// UPLOAD_ENABLED indicates whether file upload is enabled.
+	UPLOAD_ENABLED = false
+
+	// CLEANUP indicates whether to clean up existing files before uploading new ones.
+	CLEANUP = false
 )
 
 type GenericFunction func(args map[string]any) (string, error)
@@ -43,6 +51,7 @@ type Client struct {
 	lock        sync.RWMutex
 	fileCache   map[string][]byte
 	storage     *storage.Client
+	fileMap     FileMap
 	chatData    map[int64]map[string]string
 }
 
@@ -66,12 +75,26 @@ func NewClient(ctx context.Context, toolConfigs map[string]*ToolConfig, storageC
 		dbClient:    dbClient,
 		fileCache:   make(map[string][]byte),
 		storage:     storageClient,
+		fileMap:     make(map[string]*genai.File),
 		chatData:    make(map[int64]map[string]string),
 		config:      config,
 	}
 
-	if err := c.AddTools(toolConfigs); err != nil {
+	err = c.storage.LoadFromDB(filesFileName, &c.fileMap)
+	if err != nil {
 		return nil, err
+	}
+
+	err = c.AddTools(toolConfigs)
+	if err != nil {
+		return nil, err
+	}
+
+	if UPLOAD_ENABLED {
+		err = c.UploadFiles(ctx, CLEANUP)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	return c, nil
@@ -193,4 +216,75 @@ Always answer in Brazilian Portuguese (pt-BR) regardless of the language used, u
 	}
 
 	return nil
+}
+
+func (c *Client) UploadFiles(ctx context.Context, cleanup bool) error {
+	wg := sync.WaitGroup{}
+	errCh := make(chan error, 2)
+
+	files, err := c.ListFiles(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to list files: %w", err)
+	}
+	if cleanup && files != nil {
+		for _, file := range files {
+			fmt.Printf("Deleting file: %s\n", file.Name)
+			err = c.DeleteFile(ctx, file.Name)
+			if err != nil {
+				return fmt.Errorf("failed to delete file %s: %w", file.Name, err)
+			}
+		}
+	}
+
+	wg.Add(1)
+	go c.UploadFileIfNeeded(ctx, storage.PDFsPath, SpellCompendium, &wg, errCh)
+	wg.Wait()
+
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			return err
+		}
+	}
+
+	c.storage.SaveToDBAsync(filesFileName, c.fileMap)
+
+	return nil
+}
+
+func (c *Client) UploadFileIfNeeded(ctx context.Context, dir, fileName string, wg *sync.WaitGroup, errCh chan error) {
+	defer wg.Done()
+
+	var needsUpload bool
+
+	c.lock.RLock()
+	file, ok := c.fileMap[fileName]
+	c.lock.RUnlock()
+	if !ok || file == nil {
+		fmt.Printf("File %s not found in cache, needs upload\n", fileName)
+		needsUpload = true
+	}
+
+	if file != nil {
+		_, err := c.GetFile(ctx, file.Name)
+		if err != nil {
+			fmt.Printf("File %s not found in GenAI, needs upload\n", fileName)
+			needsUpload = true
+		}
+	}
+
+	var err error
+	if needsUpload {
+		nameWithoutExt := fileName[:len(fileName)-len(filepath.Ext(fileName))]
+		file, err = c.UploadFile(ctx, path.Join(dir, fileName), nameWithoutExt)
+		if err != nil {
+			errCh <- fmt.Errorf("failed to upload file %s: %w", fileName, err)
+			return
+		}
+		fmt.Printf("File %s uploaded successfully (%s)\n", fileName, file.Name)
+
+		c.lock.Lock()
+		c.fileMap[fileName] = file
+		c.lock.Unlock()
+	}
 }
