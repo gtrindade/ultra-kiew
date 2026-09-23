@@ -7,8 +7,9 @@ import (
 )
 
 type FoundryConfig struct {
-	Directory   string `yaml:"directory"`
-	ServicePath string `yaml:"service_path"`
+	// Directory is the FoundryVTT install root: the folder holding the
+	// Server-<version> directories and the Server symlink that selects one.
+	Directory string `yaml:"directory"`
 }
 
 type DBConfig struct {
