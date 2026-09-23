@@ -1,6 +1,8 @@
 package googlegenai
 
 import (
+	"bytes"
+	"log"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -130,60 +132,94 @@ func TestADanglingCurrentSymlinkDoesNotBreakTheListing(t *testing.T) {
 	}
 }
 
-// The whole point of the rewrite: a negative answer has to be diagnosable from
-// the chat, without anyone opening an SSH session.
-func TestAnEmptyListingSaysWhereItLookedAndWhatItSaw(t *testing.T) {
+// A negative answer must stay diagnosable -- but in the bot log, where an
+// operator looks, not in the tool result, which a model reads out loud to a
+// group chat and then reasons about.
+func TestAnEmptyListingKeepsServerDetailOutOfTheReply(t *testing.T) {
 	dir := t.TempDir()
-	for _, name := range []string{"foundry-13.331", "backups", "notes.txt"} {
+	for _, name := range []string{"Data", "foundry-13.351", "notes.txt"} {
 		if err := os.MkdirAll(filepath.Join(dir, name), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	got, err := foundryClient(t, dir).listFoundryVersions()
-	if err != nil {
-		t.Fatalf("an empty listing is not an error: %v", err)
+	got, logged := captureLog(t, func() (string, error) {
+		return foundryClient(t, dir).listFoundryVersions()
+	})
+
+	// What the model is told: that it is server-side, and nothing more.
+	if strings.Contains(got, dir) {
+		t.Errorf("the reply leaked the server path:\n%s", got)
+	}
+	for _, leak := range []string{"foundry-13.351", "notes.txt", versionPrefix} {
+		if strings.Contains(got, leak) {
+			t.Errorf("the reply leaked %q:\n%s", leak, got)
+		}
+	}
+	if !strings.Contains(got, "server-side") {
+		t.Errorf("expected the reply to say it is server-side:\n%s", got)
 	}
 
-	if !strings.Contains(got, dir) {
-		t.Errorf("expected the path it searched, got:\n%s", got)
+	// What the operator gets: everything needed to fix it.
+	if !strings.Contains(logged, dir) {
+		t.Errorf("expected the path in the log:\n%s", logged)
 	}
-	if !strings.Contains(got, versionPrefix) {
-		t.Errorf("expected the expected naming explained, got:\n%s", got)
-	}
-	for _, want := range []string{"foundry-13.331", "backups", "notes.txt"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("expected %q reported as what was found, got:\n%s", want, got)
+	for _, want := range []string{"foundry-13.351", "notes.txt", versionPrefix} {
+		if !strings.Contains(logged, want) {
+			t.Errorf("expected %q in the log:\n%s", want, logged)
 		}
 	}
 }
 
-func TestAnEmptyDirectorySaysSo(t *testing.T) {
-	got, err := foundryClient(t, t.TempDir()).listFoundryVersions()
+// captureLog runs fn with the standard logger redirected, returning both the
+// tool result and whatever was logged.
+func captureLog(t *testing.T, fn func() (string, error)) (result, logged string) {
+	t.Helper()
+	var buf bytes.Buffer
+	flags := log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(os.Stderr)
+		log.SetFlags(flags)
+	})
+
+	got, err := fn()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !strings.Contains(got, "completely empty") {
-		t.Errorf("expected the empty directory called out, got:\n%s", got)
+	return got, buf.String()
+}
+
+func TestAnEmptyDirectoryIsLoggedNotAnnounced(t *testing.T) {
+	dir := t.TempDir()
+
+	got, logged := captureLog(t, func() (string, error) {
+		return foundryClient(t, dir).listFoundryVersions()
+	})
+
+	if strings.Contains(got, dir) {
+		t.Errorf("the reply leaked the server path:\n%s", got)
+	}
+	if !strings.Contains(logged, "is empty") {
+		t.Errorf("expected the empty directory called out in the log:\n%s", logged)
 	}
 }
 
-// A long listing must not try to push an entire filesystem into a Telegram
-// message.
-func TestAnEmptyListingIsBounded(t *testing.T) {
+// A long listing must not push an entire filesystem into the log either.
+func TestTheLoggedListingIsBounded(t *testing.T) {
 	dir := t.TempDir()
 	for i := range 40 {
-		if err := os.MkdirAll(filepath.Join(dir, string(rune('a'+i%26))+strings.Repeat("x", i)), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Join(dir, string(rune(97+i%26))+strings.Repeat("x", i)), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	got, err := foundryClient(t, dir).listFoundryVersions()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(got, "more") {
-		t.Errorf("expected the list truncated with a count, got:\n%s", got)
+	_, logged := captureLog(t, func() (string, error) {
+		return foundryClient(t, dir).listFoundryVersions()
+	})
+	if !strings.Contains(logged, "more") {
+		t.Errorf("expected the log truncated with a count:\n%s", logged)
 	}
 }
 
@@ -216,15 +252,28 @@ func TestAnEmptyDirectorySettingIsReported(t *testing.T) {
 	}
 }
 
-func TestAMissingDirectoryReportsThePath(t *testing.T) {
+// The path goes to the log; the model is told only that it is server-side.
+func TestAMissingDirectoryLogsThePathWithoutRelayingIt(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "nao-existe")
+
+	var buf bytes.Buffer
+	flags := log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	defer func() {
+		log.SetOutput(os.Stderr)
+		log.SetFlags(flags)
+	}()
 
 	_, err := foundryClient(t, missing).listFoundryVersions()
 	if err == nil {
 		t.Fatal("expected an error for a missing directory")
 	}
-	if !strings.Contains(err.Error(), missing) {
-		t.Errorf("expected the path in the error, got: %v", err)
+	if strings.Contains(err.Error(), missing) {
+		t.Errorf("the error handed to the model leaked the path: %v", err)
+	}
+	if !strings.Contains(buf.String(), missing) {
+		t.Errorf("expected the path in the log, got: %s", buf.String())
 	}
 }
 
@@ -285,6 +334,9 @@ func TestTheRealServerLayoutLists(t *testing.T) {
 		t.Fatalf("list failed: %v", err)
 	}
 
+	if strings.Contains(got, dir) {
+		t.Errorf("even a successful listing must not carry the server path:\n%s", got)
+	}
 	if !strings.Contains(got, "13.351 (current)") {
 		t.Errorf("expected the linked version marked current, got:\n%s", got)
 	}

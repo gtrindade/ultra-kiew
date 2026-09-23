@@ -2,6 +2,7 @@ package googlegenai
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -120,7 +121,8 @@ func (c *Client) listFoundryVersions() (string, error) {
 
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return "", fmt.Errorf("failed to read the FoundryVTT directory %s: %w", dir, err)
+		log.Printf("foundry: cannot read the install directory %s: %v", dir, err)
+		return "", fmt.Errorf("the FoundryVTT install directory could not be read. This is a server-side problem and the details are in the bot log; say that and do not speculate about the cause")
 	}
 
 	// Stat rather than Readlink, and compared with SameFile, so that the link
@@ -166,22 +168,29 @@ func (c *Client) listFoundryVersions() (string, error) {
 	}
 
 	if len(versions) == 0 {
-		return emptyFoundryListing(dir, entries, ignored), nil
+		logEmptyListing(dir, entries, ignored)
+		return "No FoundryVTT versions are installed where the bot is configured to look. This is a server-side problem, and the bot log has the details. Tell the user that plainly. You cannot see the server, so do not describe folder names, paths or what might be wrong -- you would be guessing", nil
 	}
 
-	return fmt.Sprintf("Available FoundryVTT versions in %s:\n%s", dir, strings.Join(versions, "\n")), nil
+	log.Printf("foundry: listed %d version(s) in %s", len(versions), dir)
+	return fmt.Sprintf("Available FoundryVTT versions:\n%s", strings.Join(versions, "\n")), nil
 }
 
-// emptyFoundryListing explains WHY nothing was found.
+// logEmptyListing records WHY nothing was found, for whoever runs the server.
 //
-// The message this replaces was "No FoundryVTT versions found": true, and
-// useless. It cannot tell a wrong path from an empty directory from a renamed
-// folder, so the only way to distinguish them was to go and look at the server
-// by hand -- which is the exact chore a bot with filesystem access should be
-// saving someone. A negative result should say what it actually saw.
-func emptyFoundryListing(dir string, entries []os.DirEntry, ignored []string) string {
+// This detail used to be returned to the model instead, which was the wrong
+// channel twice over. It put the contents of a server directory into a group
+// chat, and it handed the model operational facts it then reasoned about out
+// loud -- announcing that the folders "are named differently than the tool
+// expects", which is a maintainer conclusion, not an answer to the question
+// that was asked.
+//
+// The information is still worth having; it just belongs where an operator
+// looks. The tool now tells the model only that the problem is server-side.
+func logEmptyListing(dir string, entries []os.DirEntry, ignored []string) {
 	if len(entries) == 0 {
-		return fmt.Sprintf("No FoundryVTT versions found: the directory %s exists but is completely empty. Either the path in config.yaml is wrong or the installs live somewhere else. Report this to the user including the path.", dir)
+		log.Printf("foundry: no versions found -- %s exists but is empty. Either foundry_vtt.directory is wrong or the installs are elsewhere", dir)
+		return
 	}
 
 	listed := ignored
@@ -189,7 +198,7 @@ func emptyFoundryListing(dir string, entries []os.DirEntry, ignored []string) st
 		listed = append(listed[:maxListedEntries:maxListedEntries], fmt.Sprintf("...and %d more", len(ignored)-maxListedEntries))
 	}
 
-	return fmt.Sprintf("No FoundryVTT versions found in %s. A version has to be a directory named %s<version>, for example %s13.351. That directory holds %d entries, none of which match: %s. Report this to the user exactly, including the path and what was found, so they can see whether the path is wrong or the folders are named differently.",
+	log.Printf("foundry: no versions found in %s. Expected directories named %s<version>, e.g. %s13.351. Found %d entries, none matching: %s",
 		dir, versionPrefix, versionPrefix, len(entries), strings.Join(listed, ", "))
 }
 
