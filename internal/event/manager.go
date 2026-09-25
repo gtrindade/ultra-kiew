@@ -1261,7 +1261,7 @@ func (m *Manager) runMonitorTick(ctx context.Context) {
 				}
 			}
 
-			m.sendReminder(chatIDStr, ev, whenStr)
+			m.sendReminder(chatIDStr, ev, whenStr, reminder12Hour)
 			ev.Reminder12HourSent = true
 			events[chatIDStr] = ev
 			eventsChanged = true
@@ -1281,7 +1281,7 @@ func (m *Manager) runMonitorTick(ctx context.Context) {
 				}
 			}
 
-			m.sendReminder(chatIDStr, ev, whenStr)
+			m.sendReminder(chatIDStr, ev, whenStr, reminder1Hour)
 			ev.Reminder1HourSent = true
 			events[chatIDStr] = ev
 			eventsChanged = true
@@ -1302,7 +1302,7 @@ func (m *Manager) runMonitorTick(ctx context.Context) {
 
 		if ev.Timestamp > 0 && ev.Timestamp <= now {
 			if !ev.ReminderNowSent {
-				m.sendReminder(chatIDStr, ev, "agora")
+				m.sendReminder(chatIDStr, ev, "agora", reminderNow)
 				ev.ReminderNowSent = true
 			}
 
@@ -1355,6 +1355,40 @@ func (m *Manager) runMonitorTick(ctx context.Context) {
 	if archivedChanged {
 		m.storage.MustSave("archived_events.json", archivedEvents)
 	}
+}
+
+// reminderKind identifies which of the scheduled reminders is being sent.
+//
+// Named, rather than inferred from the "when" text. That text is generated
+// prose -- "12 horas", "3 horas", "45 minutos", "agora" -- and deciding
+// behaviour by matching it would quietly break the first time the wording
+// changed, in a way nobody would notice until a link went missing.
+type reminderKind int
+
+const (
+	reminder12Hour reminderKind = iota
+	reminder1Hour
+	reminderNow
+)
+
+// carriesMeetLink reports whether this reminder should include the join link.
+//
+// The 12-hour one does not. Nobody joins a call half a day early, so there it
+// is noise -- and a link repeated at every reminder is how people learn to
+// skim past it, which costs exactly when it matters. It goes out when it is
+// actionable: an hour before, and at the start.
+func (k reminderKind) carriesMeetLink() bool {
+	return k == reminder1Hour || k == reminderNow
+}
+
+// meetInfoForReminder returns the Meet details this reminder may advertise, or
+// nil when it may not. Separate from carriesMeetLink so the composition with
+// appendMeetLink is directly testable without a bot.
+func meetInfoForReminder(kind reminderKind, meetInfo *MeetInfo) *MeetInfo {
+	if !kind.carriesMeetLink() {
+		return nil
+	}
+	return meetInfo
 }
 
 // appendMeetLink adds the join link after generation, never handing it to the
@@ -1540,7 +1574,7 @@ func (m *Manager) send24hCallout(chatIDStr string, ev Event) {
 	}
 }
 
-func (m *Manager) sendReminder(chatIDStr string, ev Event, when string) {
+func (m *Manager) sendReminder(chatIDStr string, ev Event, when string, kind reminderKind) {
 	timeMsg := "daqui a " + when
 	if when == "agora" {
 		timeMsg = "AGORA"
@@ -1570,8 +1604,9 @@ func (m *Manager) sendReminder(chatIDStr string, ev Event, when string) {
 		}
 	}
 
-	hasMeetLink := ev.Meet != nil && ev.Meet.JoinURI != ""
-	text = appendMeetLink(text, ev.Meet)
+	meetInfo := meetInfoForReminder(kind, ev.Meet)
+	hasMeetLink := meetInfo != nil && meetInfo.JoinURI != ""
+	text = appendMeetLink(text, meetInfo)
 
 	log.Printf("Alert: Reminder sent for event '%s' (%s) to chat %s", ev.Summary, timeMsg, chatIDStr)
 

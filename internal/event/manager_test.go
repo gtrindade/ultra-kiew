@@ -1206,3 +1206,77 @@ func mustLoad(t *testing.T, name string) *time.Location {
 	}
 	return loc
 }
+
+// Nobody joins a call half a day early, so the 12-hour reminder goes out
+// without the link. Repeating it at every reminder is how people learn to skim
+// past it, which costs exactly at the moment it matters.
+func TestOnlyTheNearRemindersCarryTheMeetLink(t *testing.T) {
+	cases := []struct {
+		kind reminderKind
+		name string
+		want bool
+	}{
+		{reminder12Hour, "12 hours out", false},
+		{reminder1Hour, "1 hour out", true},
+		{reminderNow, "starting now", true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.kind.carriesMeetLink(); got != tc.want {
+				t.Errorf("carriesMeetLink() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// The composition that actually reaches the chat: the gate feeding
+// appendMeetLink. Tested together because either half being right on its own
+// is not the property that matters.
+func TestTheReminderTextCarriesTheLinkOnlyWhenItShould(t *testing.T) {
+	meetInfo := &MeetInfo{JoinURI: "https://meet.google.com/abc-defg-hij"}
+	const base = "Bora @alice, a sessão começa AGORA!"
+
+	early := appendMeetLink(base, meetInfoForReminder(reminder12Hour, meetInfo))
+	if early != base {
+		t.Errorf("the 12-hour reminder must go out untouched, got:\n%s", early)
+	}
+	if strings.Contains(early, "meet.google.com") {
+		t.Errorf("the 12-hour reminder leaked the link:\n%s", early)
+	}
+
+	for _, kind := range []reminderKind{reminder1Hour, reminderNow} {
+		got := appendMeetLink(base, meetInfoForReminder(kind, meetInfo))
+		if !strings.Contains(got, meetInfo.JoinURI) {
+			t.Errorf("kind %d should carry the link, got:\n%s", kind, got)
+		}
+		if !strings.Contains(got, base) {
+			t.Errorf("kind %d dropped the reminder text, got:\n%s", kind, got)
+		}
+	}
+}
+
+// An event with no Meet space is unaffected either way -- the near reminders
+// simply have nothing to append.
+func TestARemindersLinkIsAbsentWhenThereIsNoMeet(t *testing.T) {
+	for _, kind := range []reminderKind{reminder12Hour, reminder1Hour, reminderNow} {
+		if got := meetInfoForReminder(kind, nil); got != nil {
+			t.Errorf("kind %d: expected nil, got %+v", kind, got)
+		}
+	}
+}
+
+// sendReminder must stay safe with no bot, like every other sender here.
+func TestSendReminderIsSafeWithNoBotConfigured(t *testing.T) {
+	m := NewManager(setupTestStorage(t, "America/Sao_Paulo"))
+	ev := Event{
+		Summary:       "Sessão 12",
+		Confirmations: map[string]string{"@alice": "💪"},
+		Meet:          &MeetInfo{JoinURI: "https://meet.google.com/abc"},
+	}
+
+	// Must not panic for any of the three.
+	m.sendReminder("-100", ev, "12 horas", reminder12Hour)
+	m.sendReminder("-100", ev, "1 hora", reminder1Hour)
+	m.sendReminder("-100", ev, "agora", reminderNow)
+}
